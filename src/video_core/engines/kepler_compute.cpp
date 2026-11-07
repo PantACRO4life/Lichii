@@ -1064,8 +1064,8 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     if (!BypassEnabled(program_id)) {
         return false;
     }
-    auto* const bypass = rasterizer->OotNetworkBypass();
-    if (!bypass) {
+    auto* const bypass_state = rasterizer->OotNetworkBypass();
+    if (!bypass_state) {
         return false;
     }
     // The tonemap pass draws before the network every frame; until it has been seen (menus, the
@@ -1073,14 +1073,14 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
     // pass is being replaced, so a failed replacement brings the whole network back next frame.
     Maxwell3D::Regs::RenderTargetConfig tonemapped;
     {
-        std::scoped_lock lock{bypass->mutex};
-        tonemapped = bypass->tonemapped;
+        std::scoped_lock lock{bypass_state->mutex};
+        tonemapped = bypass_state->tonemapped;
     }
     if (tonemapped.Address() == 0) {
         return false;
     }
     if (native_key == PrepassProgramKey || native_key == NetworkProgramKey) {
-        return bypass->output_replaced.load(std::memory_order_relaxed);
+        return bypass_state->output_replaced.load(std::memory_order_relaxed);
     }
     if (native_key != OutputProgramKey) {
         return false;
@@ -1092,7 +1092,7 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
         tonemapped.format != Tegra::RenderTargetFormat::B10G11R11_FLOAT ||
         tonemapped.tile_mode.is_pitch_linear || tonemapped.width != output->Width() ||
         tonemapped.height != output->Height()) {
-        bypass->output_replaced.store(false, std::memory_order_relaxed);
+        bypass_state->output_replaced.store(false, std::memory_order_relaxed);
         static bool warned = false;
         if (!std::exchange(warned, true)) {
             LOG_WARNING(HW_GPU,
@@ -1137,7 +1137,7 @@ bool KeplerCompute::BypassOotNetwork(u64 program_id, u64 native_key) {
         .src_y1 = height,
     };
     const bool copied = rasterizer->AccelerateSurfaceCopy(source, destination, config);
-    bypass->output_replaced.store(copied, std::memory_order_relaxed);
+    bypass_state->output_replaced.store(copied, std::memory_order_relaxed);
     static bool logged = false;
     if (!std::exchange(logged, true)) {
         LOG_INFO(HW_GPU,
