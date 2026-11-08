@@ -1026,6 +1026,14 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
         return;
     }
     if (!pipeline_cache_filename.empty()) {
+        // A later load (another title or program) stops the earlier warm-ups and waits for them,
+        // so StartComputeWarm and StartGraphicsWarm can start this title's and warm_cancel is
+        // only cleared once no thread of the earlier load is left.
+        warm_cancel = true;
+        graphics_warm_threads.clear();
+        compute_warm_threads.clear();
+        warm_stop_callback.reset();
+        compute_warm_done = true;
         background_pipelines.Stop();
         workers.WaitForRequests();
         serialization_thread.WaitForRequests();
@@ -1294,9 +1302,13 @@ size_t WarmThreads() {
     return forced != 0 ? forced : setting;
 }
 
+bool ComputeNoInline();
+
 /// The "already warmed" marker: warm file size and last-write time, entry count, GPU driver
-/// version and device ID, pipeline cache version. Next to the warm file, or in the title's
-/// shader folder when that folder is not writable.
+/// version and device ID, pipeline cache version, and whether shared shader functions were built
+/// as calls (compute bit 0, graphics bit 1: the SPIR-V the driver compiled differs between the
+/// two). Next to the warm file, or in the title's shader folder when that folder is not writable.
+/// Markers written before the last field existed no longer match, so that warm-up runs once more.
 struct WarmStamp {
     u64 size{};
     s64 write_time{};
@@ -1304,6 +1316,7 @@ struct WarmStamp {
     u32 driver{};
     u32 device_id{};
     u32 cache_version{};
+    u32 no_inline{};
 };
 
 /// The marker values for `file` on this device, empty when the file's size or time cannot be read.
@@ -1318,8 +1331,14 @@ std::optional<WarmStamp> CurrentStamp(const std::filesystem::path& file, const D
     if (ec) {
         return std::nullopt;
     }
-    return WarmStamp{size, static_cast<s64>(time.time_since_epoch().count()), entries,
-                     device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION};
+    const u32 no_inline = (ComputeNoInline() ? 1U : 0U) | (GraphicsNoInline() ? 2U : 0U);
+    return WarmStamp{size,
+                     static_cast<s64>(time.time_since_epoch().count()),
+                     entries,
+                     device.GetDriverVersion(),
+                     device.GetDeviceID(),
+                     CACHE_VERSION,
+                     no_inline};
 }
 
 std::array<std::filesystem::path, 2> MarkerPaths(const std::filesystem::path& file,
@@ -1339,10 +1358,11 @@ bool WarmAlreadyDone(const std::filesystem::path& file, const std::filesystem::p
         std::ifstream in(marker);
         WarmStamp saved;
         if (in >> saved.size >> saved.write_time >> saved.entries >> saved.driver >>
-            saved.device_id >> saved.cache_version) {
+            saved.device_id >> saved.cache_version >> saved.no_inline) {
             if (saved.size == stamp->size && saved.write_time == stamp->write_time &&
                 saved.driver == stamp->driver && saved.device_id == stamp->device_id &&
-                saved.cache_version == stamp->cache_version) {
+                saved.cache_version == stamp->cache_version &&
+                saved.no_inline == stamp->no_inline) {
                 return true;
             }
         }
@@ -1363,7 +1383,8 @@ void WriteWarmMarker(const std::filesystem::path& file, const std::filesystem::p
         std::filesystem::create_directories(marker.parent_path(), ec);
         std::ofstream out(marker, std::ios::trunc);
         out << stamp->size << ' ' << stamp->write_time << ' ' << stamp->entries << ' '
-            << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << '\n';
+            << stamp->driver << ' ' << stamp->device_id << ' ' << stamp->cache_version << ' '
+            << stamp->no_inline << '\n';
         out.close();
         if (out) {
             return;
@@ -1554,6 +1575,8 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
         bool failed{};
         std::atomic<size_t> built{};
         std::atomic<size_t> failed_builds{};
+        /// Builds the driver refused: worth another warm-up, unlike entries that cannot be built.
+        std::atomic<size_t> driver_failures{};
         std::atomic<size_t> running{};
         size_t read{}; ///< Entries taken from the file (under the mutex)
         size_t known_total{}; ///< Entry count recorded by the builder, 0 when unknown
@@ -1640,14 +1663,21 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                     }
                 }
                 env.SetGuessMissing(&guess);
-                bool ok = false;
+                WarmResult result = WarmResult::Unbuildable;
                 try {
                     Shader::Environment* const env_ptr = &env;
-                    ok = WarmGraphicsLibraries(pools, key, std::span{&env_ptr, 1});
+                    result = WarmGraphicsLibraries(pools, key, std::span{&env_ptr, 1});
+                } catch (const vk::Exception& e) {
+                    LOG_DEBUG(Render_Vulkan, "graphics_warm: {}", e.what());
+                    result = WarmResult::DriverFailed;
                 } catch (const std::exception& e) {
                     LOG_DEBUG(Render_Vulkan, "graphics_warm: {}", e.what());
                 }
+                const bool ok = result == WarmResult::Built;
                 (ok ? reader->built : reader->failed_builds).fetch_add(1);
+                if (result == WarmResult::DriverFailed) {
+                    reader->driver_failures.fetch_add(1);
+                }
                 const size_t done = reader->built + reader->failed_builds;
                 if (reader->throttle.Due()) {
                     // The builder's recorded count, or else an estimate from the bytes read.
@@ -1674,7 +1704,8 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                 bool complete = false;
                 {
                     std::scoped_lock lock{reader->mutex};
-                    complete = !reader->failed && reader->end == reader->position;
+                    complete = !reader->failed && reader->end == reader->position &&
+                               reader->driver_failures == 0;
                 }
                 if (complete && !stop.stop_requested() && !warm_cancel) {
                     WriteWarmMarker(warm_file, title_file, device, reader->read);
@@ -1868,15 +1899,19 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipelineSlowPath() {
     return BuiltPipeline(current_pipeline);
 }
 
-bool PipelineCache::WarmGraphicsLibraries(ShaderPools& pools, const GraphicsPipelineCacheKey& key,
-                                          std::span<Shader::Environment* const> envs) {
+PipelineCache::WarmResult PipelineCache::WarmGraphicsLibraries(
+    ShaderPools& pools, const GraphicsPipelineCacheKey& key,
+    std::span<Shader::Environment* const> envs) {
     if (!device.IsExtGraphicsPipelineLibrarySupported()) {
-        return false;
+        return WarmResult::Unbuildable;
     }
     pools.ReleaseContents();
     const auto pipeline{
         CreateGraphicsPipeline(pools, key, envs, nullptr, false, nullptr, nullptr, true)};
-    return pipeline && !pipeline->Failed();
+    if (!pipeline) {
+        return WarmResult::Unbuildable;
+    }
+    return pipeline->Failed() ? WarmResult::DriverFailed : WarmResult::Built;
 }
 
 /// Per-frame upkeep: reports library counters, frees evicted and retired pipelines the GPU is done
@@ -2014,7 +2049,12 @@ bool PipelineCache::CurrentTargetIsRedrawn() {
         const u32 height = color != 0 ? regs.rt[0].height : regs.zeta_size.height;
         const bool scene_sized = width >= 1280 && width > height;
         const bool recent = it->second.previous != 0 && it->second.previous + 2 >= frame_count;
-        if (!cleared_now(color) && !cleared_now(depth)) {
+        // Every attachment the draw has must have been cleared: a depth-only clear says
+        // nothing about color target 0, and the other way round.
+        const bool all_cleared = (color != 0 || depth != 0) &&
+                                 (color == 0 || cleared_now(color)) &&
+                                 (depth == 0 || cleared_now(depth));
+        if (!all_cleared) {
             last_target_reason = TargetReason::NotCleared;
         } else if (!recent && !scene_sized) {
             last_target_reason = TargetReason::NewTarget;
