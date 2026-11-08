@@ -1209,7 +1209,15 @@ std::vector<u64> FileEnvironment::MappedStoragePointerKeys() const {
 bool FileEnvironment::IsCbufStorageBufferPointer(u32 index, u32 offset) {
     const auto it = storage_pointer_types.find(MakeCbufKey(index, offset));
     if (it == storage_pointer_types.end()) {
+        // Bank 0 holds each stage's storage buffer bindings at 16-byte slots; bank 1 is the
+        // program's constant table, never an address.
+        if (static_context && ((index == 0 && offset % 16 == 0) || index == 1)) {
+            const bool mapped = index == 0;
+            storage_pointer_types.emplace(MakeCbufKey(index, offset), static_cast<u8>(mapped));
+            return mapped;
+        }
         if (guess) {
+            ++inexact_reads;
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
         throw Shader::LogicError("Uncached storage pointer classification");
@@ -1222,6 +1230,7 @@ bool FileEnvironment::IsCbufIndirectStorageBufferPointer(u32 index, u32 offset, 
     const auto it = storage_pointer_types.find(MakeIndirectCbufKey(index, offset, indirect));
     if (it == storage_pointer_types.end()) {
         if (guess) {
+            ++inexact_reads;
             return index == 0 ? guess->storage_pointer_bank0 : guess->storage_pointer_other;
         }
         throw Shader::LogicError("Uncached storage pointer table classification");
@@ -1241,7 +1250,16 @@ u64 FileEnvironment::ReadInstruction(u32 address) {
 u32 FileEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
     const auto it{cbuf_values.find(MakeCbufKey(cbuf_index, cbuf_offset))};
     if (it == cbuf_values.end()) {
+        // A texture handle the draw or dispatch binds: translation needs only its type and
+        // format class, not the handle itself.
+        if (static_context && cbuf_index != 1 &&
+            (cbuf_index == 2 || stage == Shader::Stage::Compute)) {
+            const u32 handle = 0x00F00000U | (cbuf_offset / 4);
+            cbuf_values.emplace(MakeCbufKey(cbuf_index, cbuf_offset), handle);
+            return handle;
+        }
         if (guess) {
+            ++inexact_reads;
             return cbuf_index == 0 ? guess->cbuf_bank0 : guess->cbuf_other;
         }
         throw Shader::LogicError("Uncached read texture type");
@@ -1253,7 +1271,14 @@ u32 FileEnvironment::ReadCbufValue(u32 cbuf_index, u32 cbuf_offset) {
 Shader::TextureType FileEnvironment::ReadTextureType(u32 handle) {
     const auto it{texture_types.find(handle)};
     if (it == texture_types.end()) {
+        // The instruction's own type decides 2D vs array; this only tells rect and buffer
+        // textures apart, which none of Ocarina of Time's recorded programs use.
+        if (static_context) {
+            texture_types.emplace(handle, Shader::TextureType::Color2D);
+            return Shader::TextureType::Color2D;
+        }
         if (guess) {
+            ++inexact_reads;
             return guess->texture_type;
         }
         throw Shader::LogicError("Uncached read texture type");
@@ -1266,12 +1291,32 @@ Shader::TextureType FileEnvironment::ReadTextureType(u32 handle) {
 Shader::TexturePixelFormat FileEnvironment::ReadTexturePixelFormat(u32 handle) {
     const auto it{texture_pixel_formats.find(handle)};
     if (it == texture_pixel_formats.end()) {
+        // Not in the program: recorded programs of Ocarina of Time bind no integer formats,
+        // but this stays an assumption.
+        if (static_context) {
+            ++inexact_reads;
+            const auto format = static_cast<Shader::TexturePixelFormat>(
+                VideoCore::Surface::PixelFormat::A8B8G8R8_UNORM);
+            texture_pixel_formats.emplace(handle, format);
+            return format;
+        }
         if (guess) {
+            ++inexact_reads;
             return guess->pixel_format;
         }
         throw Shader::LogicError("Uncached read texture pixel format");
     }
     return it->second;
+}
+
+void FileEnvironment::NoteInferredTextureType(u32 handle, Shader::TextureType type) {
+    if (!static_context) {
+        return;
+    }
+    const auto [it, inserted] = texture_types.emplace(handle, type);
+    if (!inserted && it->second != type) {
+        throw Shader::LogicError("Texture handle used with conflicting types");
+    }
 }
 
 bool FileEnvironment::IsTexturePixelFormatInteger(u32 handle) {

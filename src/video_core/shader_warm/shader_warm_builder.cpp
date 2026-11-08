@@ -168,6 +168,7 @@ struct Job {
     u32 stage{};
     size_t graphics_index{};
     std::vector<u8> program;
+    std::vector<u8> constants;
     ComputeControl control{};
 };
 
@@ -272,9 +273,10 @@ private:
             }
             if (job.graphics) {
                 result.hash = StageHash(lowered.code);
-                result.bytes = GraphicsEnv(job.stage, lowered, job.program);
+                result.bytes = GraphicsEnv(job.stage, lowered, job.program, job.constants);
             } else {
-                result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
+                result.bytes =
+                    ComputeEntry(lowered, job.control, job.constants, result.compute_key);
             }
             result.ok = true;
         } catch (const std::exception& e) {
@@ -629,6 +631,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             }
             job.seq = seq++;
             job.program.assign(record.code.begin(), record.code.end());
+            job.constants.assign(record.constants.begin(), record.constants.end());
             job_kinds.emplace_back(job.graphics, job.graphics_index);
             converter->Push(std::move(job));
             while (converter->Pending() > MaxPendingJobs && !stop.stop_requested()) {

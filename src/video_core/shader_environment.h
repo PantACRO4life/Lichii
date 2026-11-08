@@ -240,6 +240,26 @@ public:
     void SetGuessMissing(const GuessMissing* guess_) noexcept {
         guess = guess_;
     }
+
+    /// Translation ahead of time from the game files (warm-up entries): reads without a record
+    /// are answered from rules the program's own data makes exact (storage buffer slots of bank
+    /// 0, bank 1 is never a pointer, texture handles, types from the program's instructions),
+    /// then from the guess when one is set. The answers are recorded.
+    void SetStaticContext() noexcept {
+        static_context = true;
+    }
+
+    /// Reads answered by the guess or by the assumed pixel format: nonzero means the translation
+    /// may differ from the one the game's own state would give.
+    [[nodiscard]] size_t InexactReads() const noexcept {
+        return inexact_reads;
+    }
+
+    [[nodiscard]] bool CanReadTextureDescriptors() const override {
+        return !static_context;
+    }
+
+    void NoteInferredTextureType(u32 handle, Shader::TextureType type) override;
     ~FileEnvironment() override = default;
 
     FileEnvironment& operator=(FileEnvironment&&) noexcept = default;
@@ -315,6 +335,8 @@ private:
     u32 initial_offset{};
     u32 viewport_transform_state = 1;
     const GuessMissing* guess{};
+    bool static_context{};
+    size_t inexact_reads{};
 };
 
 void SerializePipeline(std::span<const char> key, std::span<const GenericEnvironment* const> envs,

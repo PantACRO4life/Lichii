@@ -931,6 +931,63 @@ void OrderComputeTranslations(std::vector<FileEnvironment>& candidates) {
     }
     candidates = std::move(ordered);
 }
+
+/// Compute programs of the title's warm-up file (EDEN_NX2_COMPUTE_WARM overrides the path) built
+/// at boot as this session's pipelines, when their translation needs no guess. On unless
+/// EDEN_NX2_COMPUTE_PREBUILT=0.
+bool ComputePrebuiltEnabled() {
+    static const bool enabled = [] {
+        const char* const value = std::getenv("EDEN_NX2_COMPUTE_PREBUILT");
+        return value == nullptr || value[0] != '0';
+    }();
+    return enabled;
+}
+
+std::vector<std::pair<ComputePipelineCacheKey, FileEnvironment>> ReadPrebuiltCompute(
+    u64 title_id, u32 cache_version) {
+    std::vector<std::pair<ComputePipelineCacheKey, FileEnvironment>> entries;
+    std::filesystem::path path = VideoCommon::ShaderWarm::ComputeWarmPath(title_id);
+    if (const char* const forced = std::getenv("EDEN_NX2_COMPUTE_WARM");
+        forced != nullptr && *forced != '\0') {
+        path = forced;
+    }
+    try {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            return entries;
+        }
+        file.exceptions(std::ifstream::failbit);
+        const auto end{file.tellg()};
+        file.seekg(0, std::ios::beg);
+        std::array<char, 8> magic{};
+        u32 version{};
+        file.read(magic.data(), magic.size())
+            .read(reinterpret_cast<char*>(&version), sizeof(version));
+        constexpr std::array<char, 8> expected_magic{'y', 'u', 'z', 'u', 'c', 'a', 'c', 'h'};
+        if (magic != expected_magic || version != cache_version) {
+            return entries;
+        }
+        while (file.tellg() != end) {
+            u32 num_envs{};
+            file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+            if (num_envs != 1) {
+                break;
+            }
+            FileEnvironment env;
+            env.Deserialize(file);
+            ComputePipelineCacheKey key;
+            file.read(reinterpret_cast<char*>(&key), sizeof(key));
+            if (env.ShaderStage() != Shader::Stage::Compute) {
+                break;
+            }
+            entries.emplace_back(key, std::move(env));
+        }
+    } catch (const std::exception& e) {
+        LOG_WARNING(Render_Vulkan, "Prebuilt compute: reading {} failed: {}",
+                    Common::FS::PathToUTF8String(path), e.what());
+    }
+    return entries;
+}
 } // Anonymous namespace
 
 bool PipelineCache::StaleNullPointerSlot(const ComputePipelineCacheEntry& entry) const {
@@ -1202,7 +1259,49 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     }};
     VideoCommon::LoadPipelines(stop_loading, pipeline_cache_filename, CACHE_VERSION, load_compute,
                                load_graphics);
+    // Compute programs from the game files that the disk cache lacks: built like disk cache
+    // entries, kept only when every read had an exact answer. The rest stay for the warm-up.
+    struct {
+        size_t used{};
+        size_t inexact{};
+        size_t failed{};
+    } prebuilt;
+    if (ComputePrebuiltEnabled()) {
+        for (auto& [key, env] : ReadPrebuiltCompute(title_id, CACHE_VERSION)) {
+            if (compute_envs.contains(key)) {
+                continue;
+            }
+            compute_envs.emplace(key, std::vector<FileEnvironment>{});
+            workers.QueueWork([this, key, env_ = std::move(env), &state, &callback,
+                               &prebuilt]() mutable {
+                ShaderPools pools;
+                env_.SetStaticContext();
+                ComputePipelineCacheEntry entry;
+                try {
+                    entry = CreateComputePipeline(pools, key, env_, state.statistics.get(), false);
+                } catch (const std::exception&) {
+                }
+                std::scoped_lock lock{state.mutex};
+                if (!entry.pipeline) {
+                    ++prebuilt.failed;
+                } else if (env_.InexactReads() != 0) {
+                    ++prebuilt.inexact;
+                } else {
+                    ++prebuilt.used;
+                    compute_cache.emplace(key, std::move(entry));
+                }
+                ++state.built;
+                if (state.has_loaded) {
+                    callback(VideoCore::LoadCallbackStage::Build, state.built, state.total);
+                }
+            });
+            ++state.total;
+        }
+    }
     for (auto& [key, candidates] : compute_envs) {
+        if (candidates.empty()) {
+            continue; // a prebuilt program, queued above
+        }
         OrderComputeTranslations(candidates);
         queue_compute(key, std::move(candidates));
     }
@@ -1222,6 +1321,12 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+    if (prebuilt.used + prebuilt.inexact + prebuilt.failed != 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Prebuilt compute from the game files: {} built for use, {} left to the warm-up "
+                 "(a read needed a guess), {} not built",
+                 prebuilt.used, prebuilt.inexact, prebuilt.failed);
+    }
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
@@ -1493,6 +1598,7 @@ void PipelineCache::StartComputeWarm(u64 title_id) {
                     break;
                 }
                 Entry& entry = (*entries)[index];
+                entry.env.SetStaticContext();
                 entry.env.SetGuessMissing(&guess);
                 bool ok = false;
                 try {
@@ -1647,6 +1753,7 @@ void PipelineCache::StartGraphicsWarm(u64 title_id) {
                         break;
                     }
                 }
+                env.SetStaticContext();
                 env.SetGuessMissing(&guess);
                 WarmResult result = WarmResult::Unbuildable;
                 try {
