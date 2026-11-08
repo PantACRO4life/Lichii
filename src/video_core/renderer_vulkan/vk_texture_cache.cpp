@@ -493,14 +493,16 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
 
 /// With `pool` (the runtime), takes a pooled image made with the same create info when there is
 /// one, and writes what this image is made with to `pool_key` and `pool_bytes` so the image can go
-/// back to the pool when it is deleted. Unbacked images are never pooled.
+/// back to the pool when it is deleted. Unbacked images are never pooled. `from_pool` is set when
+/// the image came from the pool, with the contents of its last owner.
 [[nodiscard]] vk::Image MakeImage(const Device& device, const MemoryAllocator& allocator,
                                   const ImageInfo& info, std::span<const VkFormat> view_formats,
                                   std::optional<VkFormat> format_override = {},
                                   bool unbacked = false, bool aliased = false,
                                   TextureCacheRuntime* pool = nullptr,
                                   std::optional<TextureCacheRuntime::PooledImageKey>* pool_key = nullptr,
-                                  u64* pool_bytes = nullptr, bool may_fail = false) {
+                                  u64* pool_bytes = nullptr, bool may_fail = false,
+                                  bool* from_pool = nullptr) {
     if (info.type == ImageType::Buffer) {
         return vk::Image{};
     }
@@ -556,6 +558,9 @@ constexpr std::array<VkFormat, 2> OpaqueAstcViewFormats{VK_FORMAT_BC1_RGBA_UNORM
             *pool_bytes = VideoCommon::CalculateGuestSizeInBytes(info);
         }
         if (vk::Image image = pool->TakePooledImage(key)) {
+            if (from_pool != nullptr) {
+                *from_pool = true;
+            }
             return image;
         }
     }
@@ -3053,7 +3058,8 @@ Image::Image(TextureCacheRuntime& runtime_, const ImageInfo& info_, GPUVAddr gpu
                                    IsUnwrittenSparse(runtime_.device, info, gpu_addr_),
                                UsesSparseTiles(runtime_.device, info, gpu_addr_) &&
                                    SparseTilesModeOf(runtime_.device) == SparseTilesMode::Aliased,
-                               &runtime_, &original_pool_key, &original_pool_bytes, true)),
+                               &runtime_, &original_pool_key, &original_pool_bytes, true,
+                               &original_from_pool)),
       aspect_mask(ImageAspectMask(info.format)) {
     original_releasable = original_image && !original_image.IsUnbacked() && info.type == ImageType::e2D &&
                           info.num_samples == 1 && info.resources.levels == 1 && !info.is_sparse &&
@@ -5281,6 +5287,21 @@ void TextureCacheRuntime::TranscodeAstcToBcn(
 }
 
 void TextureCacheRuntime::TransitionImageLayout(Image& image) {
+    // A VkImage from the pool still holds its last owner's texels: one that gets no contents
+    // here is cleared rather than show them.
+    if (!image.IsInitialized() && image.TakeFromPool()) {
+        if (ZeroImage(image)) {
+            static bool logged = false;
+            if (!std::exchange(logged, true)) {
+                LOG_INFO(Render_Vulkan,
+                         "Reused image given no contents cleared to zero: {:#x} ({} bytes, {}x{}, "
+                         "format {})",
+                         image.gpu_addr, image.guest_size_bytes, image.info.size.width,
+                         image.info.size.height, static_cast<u32>(image.info.format));
+            }
+        }
+        return;
+    }
     if (!image.ExchangeInitialization()) {
         VkImageMemoryBarrier barrier{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,

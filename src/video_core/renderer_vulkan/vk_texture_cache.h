@@ -567,6 +567,15 @@ public:
         return original_image.GetMemoryBlock();
     }
 
+    [[nodiscard]] bool IsInitialized() const noexcept {
+        return initialized;
+    }
+
+    /// Whether the VkImage came from the pool and no layout-only path has cleared it yet.
+    [[nodiscard]] bool TakeFromPool() noexcept {
+        return std::exchange(original_from_pool, false);
+    }
+
     /// Returns true when the image is already initialized and mark it as initialized
     [[nodiscard]] bool ExchangeInitialization() noexcept {
         return std::exchange(initialized, true);
@@ -729,6 +738,7 @@ private:
     std::optional<TextureCacheRuntime::PooledImageKey> scaled_pool_key;
     u64 original_pool_bytes{};
     u64 scaled_pool_bytes{};
+    bool original_from_pool = false;
 
     /// The unscaled image of a scaled_only image, made on first use.
     vk::Image& OriginalImage();
