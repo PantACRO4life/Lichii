@@ -485,19 +485,20 @@ TEST_CASE("A handle read from a table at a per-invocation index is a descriptor 
 
     REQUIRE(shader.program.info.texture_descriptors.size() == 1);
     const auto& descriptor{shader.Descriptor(first)};
-    CHECK(descriptor.count == 64);
+    CHECK(descriptor.count == 65);
     CHECK(descriptor.size_shift == 0);
     // Element k holds the handle of table entry k.
     for (const u32 element : {0U, 1U, 63U}) {
         CHECK(EvaluateTableElement(shader, descriptor, element) == 0x1000 + element * 96 + 16);
     }
-    // Each instruction indexes the array with the light index it read, clamped to the array.
+    // Each instruction indexes the array with the light index it read, clamped to the last
+    // element, which the draw binds to the null image.
     for (const IR::Inst* const sample : {&first, &second}) {
         REQUIRE_FALSE(sample->Arg(0).IsEmpty());
         const IR::Inst* const selection{sample->Arg(0).InstRecursive()};
         REQUIRE(selection->GetOpcode() == Opcode::UMin32);
         CHECK(selection->Arg(0).Resolve() == table.light.Resolve());
-        CHECK(selection->Arg(1).U32() == 63);
+        CHECK(selection->Arg(1).U32() == 64);
     }
 }
 
@@ -535,7 +536,7 @@ TEST_CASE("Hosts without handle table arrays keep the word the earlier search fi
         shader.Run();
 
         const auto& descriptor{shader.Descriptor(sample)};
-        CHECK(descriptor.count == (supported ? 64U : 1U));
+        CHECK(descriptor.count == (supported ? 65U : 1U));
         CHECK((descriptor.handle_program != ~0U) == supported);
         CHECK(descriptor.cbuf_offset == (supported ? 0U : 0x520U));
     }

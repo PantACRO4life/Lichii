@@ -617,6 +617,15 @@ template <typename Spec>
 bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     boost::container::small_vector<VideoCommon::ImageViewInOut, 160> views;
     boost::container::small_vector<VideoCommon::SamplerId, 96> samplers;
+    // The handle tables among the views, fitted once the views are filled.
+    struct HandleTable {
+        size_t first;
+        u32 count;
+        bool is_integer;
+        u64 shader;
+        u32 texture;
+    };
+    boost::container::small_vector<HandleTable, 4> handle_tables;
     views.reserve(num_image_elements);
     samplers.reserve(num_textures);
 
@@ -722,6 +731,8 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
                     VideoCommon::HandleTableNotes::Note(key.unique_hashes[stage + 1], texture,
                                                         tics);
                 }
+                handle_tables.push_back(
+                    {first, desc.count, desc.is_integer, key.unique_hashes[stage + 1], texture});
                 ++texture;
                 continue;
             }
@@ -766,6 +777,10 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
         Profile::Scope scope{Profile::Zone::FillImageViews};
         texture_cache.FillImageViews(std::span(views.data(), views.size()), false,
                                      Spec::has_images);
+        for (const HandleTable& table : handle_tables) {
+            texture_cache.FitHandleTable(std::span(views.data() + table.first, table.count), false,
+                                         table.is_integer, table.shader, table.texture);
+        }
     }
     if (RecordingSampledTextures()) {
         sampled_images.clear();

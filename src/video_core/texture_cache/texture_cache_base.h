@@ -243,6 +243,12 @@ public:
     /// Fill image_view_ids with the graphics/compute images in indices
     void FillImageViews(std::span<ImageViewInOut> views, bool compute, bool blacklist = true);
 
+    /// Binds the null image (zeros) to the elements of a handle table the shader can't sample:
+    /// the last one, which indices past the table take, and those whose texture has no format
+    /// or is integer when the array isn't (or the reverse). shader and texture name it in the log.
+    void FitHandleTable(std::span<ImageViewInOut> elements, bool compute, bool is_integer,
+                        u64 shader, u32 texture);
+
     /// Handle feedback loops during draws.
     void CheckFeedbackLoop(std::span<const ImageViewInOut> views);
 
@@ -574,6 +580,8 @@ private:
     [[nodiscard]] std::optional<DAddr> ImageCpuAddress(GPUVAddr gpu_addr, size_t size) const;
 
     bool has_deleted_images = false;
+    /// Handle tables already logged by FitHandleTable, by shader, texture and reason.
+    ::Common::unordered_set<u64> handle_table_fallbacks;
     /// While a clear binds its render targets (UpdateRenderTargets(true)): JoinImages leaves a new
     /// target's upload to ResolveDeferredRtRefreshes, which skips it when the clear overwrites it.
     bool defer_rt_refresh = false;

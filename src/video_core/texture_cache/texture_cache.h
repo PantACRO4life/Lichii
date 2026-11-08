@@ -595,6 +595,52 @@ void TextureCache<P>::FillImageViews(std::span<ImageViewInOut> views, bool compu
 }
 
 template <class P>
+void TextureCache<P>::FitHandleTable(std::span<ImageViewInOut> elements, bool compute,
+                                     bool is_integer, u64 shader, u32 texture) {
+    if (elements.empty()) {
+        return;
+    }
+    // The shader clamps its index to the last element: an index past the table reads zeros.
+    elements.back().id = NULL_IMAGE_VIEW_ID;
+    const auto& table = compute ? channel_state->compute_image_table
+                                : channel_state->graphics_image_table;
+    for (u32 element = 0; element + 1 < elements.size(); ++element) {
+        ImageViewInOut& view = elements[element];
+        if (view.id == NULL_IMAGE_VIEW_ID) {
+            continue;
+        }
+        // An entry the guest left unset (format 0) gets a stand-in format, and an integer image
+        // read through a float array (or the reverse) returns raw bits, NaN among them.
+        const u32 index = Tegra::Texture::TextureHeaderIndex(view.index, table.current_limit,
+                                                             gpu_memory->UsesNativeTiling());
+        const char* reason = nullptr;
+        u64 reason_id = 0;
+        if (index <= table.current_limit &&
+            static_cast<u32>(table.descriptors[index].format.Value()) == 0) {
+            reason = "texture format 0";
+            reason_id = 1;
+        } else if (VideoCore::Surface::IsPixelFormatInteger(slot_image_views[view.id].format) !=
+                   is_integer) {
+            reason = is_integer ? "float texture in an integer array"
+                                : "integer texture in a float array";
+            reason_id = 2;
+        }
+        if (reason == nullptr) {
+            continue;
+        }
+        view.id = NULL_IMAGE_VIEW_ID;
+        if (handle_table_fallbacks.size() < 64 &&
+            handle_table_fallbacks.insert(shader ^ (u64{texture} << 56) ^ (reason_id << 48))
+                .second) {
+            LOG_INFO(HW_GPU,
+                     "Handle table fallback: shader {:016x} texture {} element {} (tic{}) binds "
+                     "the null image: {}",
+                     shader, texture, element, view.index, reason);
+        }
+    }
+}
+
+template <class P>
 void TextureCache<P>::CheckFeedbackLoop(std::span<const ImageViewInOut> views) {
     if (!Settings::values.barrier_feedback_loops.GetValue()) {
         return;

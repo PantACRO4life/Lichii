@@ -1004,7 +1004,8 @@ void TrimTrailingTees(std::vector<u32>& code) {
 }
 
 // Elements of the descriptor array of a handle read from a table at an index word (see
-// g_handle_index_allowed): the table entries a draw binds, larger indices taking the last one.
+// g_handle_index_allowed): the table entries a draw binds. The array has one more element, the
+// null image the draw binds there, which larger indices take (FitHandleTable).
 // LICHII_BINDLESS_TABLE overrides it (1 to 1024), 0 turning such arrays off (the shader then
 // gets whatever constant buffer word the earlier search finds, as before them).
 u32 HandleTableSize() {
@@ -1318,7 +1319,7 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                     g_dominance.emplace(*g_program);
                 }
                 if (g_dominance->Dominates(index.InstRecursive(), &inst)) {
-                    count = HandleTableSize();
+                    count = HandleTableSize() + 1;
                 }
             }
             addr = ConstBufferAddr{

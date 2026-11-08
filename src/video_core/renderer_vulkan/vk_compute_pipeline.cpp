@@ -511,6 +511,14 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.image_buffer_descriptors) {
         add_image(desc, false);
     }
+    // The handle tables among the views, fitted once the views are filled.
+    struct HandleTable {
+        size_t first;
+        u32 count;
+        bool is_integer;
+        u32 texture;
+    };
+    boost::container::small_vector<HandleTable, 4> handle_tables;
     u32 texture{};
     for (const auto& desc : info.texture_descriptors) {
         if (desc.count > 1 && desc.handle_program != ~0U) {
@@ -536,6 +544,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                 }
                 VideoCommon::HandleTableNotes::Note(shader_hash, texture, tics);
             }
+            handle_tables.push_back({first, desc.count, desc.is_integer, texture});
             ++texture;
             continue;
         }
@@ -552,6 +561,10 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
         add_image(desc, desc.is_written);
     }
     texture_cache.FillImageViews(std::span(views.data(), views.size()), true);
+    for (const HandleTable& table : handle_tables) {
+        texture_cache.FitHandleTable(std::span(views.data() + table.first, table.count), true,
+                                     table.is_integer, shader_hash, table.texture);
+    }
     if (auto& trace{GetUpscalerTrace()}; trace.enabled && kepler_compute.IsNativeMode()) {
         const u64 frame{trace.frame.load(std::memory_order_relaxed)};
         if (!trace.armed && frame >= trace.first_frame && info.uses_subgroup_shuffles) {
