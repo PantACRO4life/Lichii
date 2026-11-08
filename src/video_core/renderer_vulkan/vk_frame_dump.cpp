@@ -490,14 +490,16 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
         const bool from_host = buffer.guest.empty();
         std::string tags = fmt::format(
             R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","type":"{}","index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"gpu_modified":{},"source":"{}")",
-            owner, buffer.stage, shader, buffer.storage ? "storage" : "uniform", buffer.index,
+            owner, buffer.stage, shader,
+            buffer.vertex ? "vertex" : (buffer.storage ? "storage" : "uniform"), buffer.index,
             buffer.written, buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size,
             buffer.gpu_modified, from_host ? "host" : "guest");
         if (!from_host) {
             const std::pair<u64, u32> large{buffer.device_addr, buffer.size};
             const bool repeat = buffer.size > (1U << 20) &&
                                 std::ranges::find(seen_large_host, large) != seen_large_host.end();
-            if (host_copy && buffer.storage && buffer.host != VK_NULL_HANDLE && !repeat) {
+            if (host_copy && (buffer.storage || buffer.vertex) && buffer.host != VK_NULL_HANDLE &&
+                !repeat) {
                 if (buffer.size > (1U << 20)) {
                     seen_large_host.push_back(large);
                 }
