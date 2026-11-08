@@ -248,6 +248,7 @@ jobs:
 
       # Test branches only: the emulator with its Qt files, to try a branch without building it.
       - name: Package the emulator
+        if: ${{ !cancelled() }}
         run: |
           mkdir -p package
           cp build/bin/lichii.exe build/bin/eden-cli.exe package/
@@ -255,6 +256,7 @@ jobs:
           windeployqt --release --no-translations package/lichii.exe
 
       - name: Upload the emulator
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: lichii-windows-${{ github.sha }}
