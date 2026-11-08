@@ -280,6 +280,7 @@ void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers
     pass_framebuffer = nullptr;
     dispatch_sampled.clear();
     seen_buffers.clear();
+    seen_large_host.clear();
     written_buffers.clear();
     pass_index = 0;
     draws = 0;
@@ -465,6 +466,14 @@ void FrameDump::NoteDispatchSampled(u64 shader_hash, std::span<const Sampled> te
 
 bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
                             std::span<BoundBuffer> buffers) {
+    // EDEN_NX2_DUMP_HOST_COPY=1: also record the host buffer the draw reads for guest-sourced
+    // storage buffers, so a stale or damaged host copy of guest data shows up as a difference
+    // between the two files. Large host-sourced buffers are then recorded once per capture so
+    // the size cap is not spent before the late draws.
+    static const bool host_copy = [] {
+        const char* const value = std::getenv("EDEN_NX2_DUMP_HOST_COPY");
+        return value != nullptr && value[0] == '1';
+    }();
     bool recorded = false;
     for (BoundBuffer& buffer : buffers) {
         const size_t program = compute ? 0 : buffer.stage + 1;
@@ -485,13 +494,13 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
             buffer.written, buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size,
             buffer.gpu_modified, from_host ? "host" : "guest");
         if (!from_host) {
-            // EDEN_NX2_DUMP_HOST_COPY=1: also record the host buffer the draw reads, so a stale
-            // or damaged host copy of guest data shows up as a difference between the two files.
-            static const bool host_copy = [] {
-                const char* const value = std::getenv("EDEN_NX2_DUMP_HOST_COPY");
-                return value != nullptr && value[0] == '1';
-            }();
-            if (host_copy && buffer.host != VK_NULL_HANDLE) {
+            const std::pair<u64, u32> large{buffer.device_addr, buffer.size};
+            const bool repeat = buffer.size > (1U << 20) &&
+                                std::ranges::find(seen_large_host, large) != seen_large_host.end();
+            if (host_copy && buffer.storage && buffer.host != VK_NULL_HANDLE && !repeat) {
+                if (buffer.size > (1U << 20)) {
+                    seen_large_host.push_back(large);
+                }
                 std::string host_tags = tags;
                 host_tags.replace(host_tags.rfind(R"("source":"guest")"),
                                   sizeof(R"("source":"guest")") - 1, R"("source":"host_copy")");
@@ -500,6 +509,13 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
             }
             Enqueue({.tags = std::move(tags), .data = std::move(buffer.guest), .raw = true});
             continue;
+        }
+        if (host_copy && buffer.size > (1U << 20)) {
+            const std::pair<u64, u32> large{buffer.device_addr, buffer.size};
+            if (std::ranges::find(seen_large_host, large) != seen_large_host.end()) {
+                continue;
+            }
+            seen_large_host.push_back(large);
         }
         recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags));
     }

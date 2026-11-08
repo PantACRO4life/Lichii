@@ -244,6 +244,8 @@ private:
     std::vector<std::tuple<u64, GPUVAddr, u32>> dispatch_sampled;
     /// (shader hash, storage, binding index, device address, size) already recorded this frame.
     std::vector<std::tuple<u64, bool, u32, u64, u32>> seen_buffers;
+    /// Host-sourced buffers over 1 MiB already recorded in this capture (EDEN_NX2_DUMP_HOST_COPY).
+    std::vector<std::pair<u64, u32>> seen_large_host;
     /// Content hashes of the buffer files written; writer thread only.
     std::vector<u64> written_buffers;
     u32 pass_index{};
