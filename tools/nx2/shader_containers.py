@@ -313,13 +313,16 @@ def parse_sharcb(data):
         if (control[:8] != bytes.fromhex("34127698c9000000") or
                 struct.unpack_from("<I", control, 84)[0] >> 16 != expected_type):
             raise ArchiveError("BAHS record disagrees with the NVN2 control stage or version")
-        declared, _, instruction_allocation, allocation = struct.unpack_from("<4I", control, 56)
-        if (not declared or declared % 16 or instruction_allocation % 16 or
-                not declared <= instruction_allocation <= allocation or
+        declared, table_size, instruction_allocation, allocation = struct.unpack_from("<4I", control, 56)
+        if (not declared or declared % 16 or instruction_allocation % 16 or table_size % 4 or
+                not declared <= instruction_allocation <= instruction_allocation + table_size <= allocation or
                 code_relative + allocation > pool_size):
             raise ArchiveError("invalid BAHS code extent")
         code_offset = pool + code_relative
         code_size = declared if stage == "compute" else instruction_allocation
+        if table_size:
+            # The program's constant table (driver bank 1) follows the instructions.
+            code_size = min(allocation, (instruction_allocation + table_size + 15) & ~15)
         location = (code_offset, code_size)
         if location not in allocations:
             allocations[location] = data[code_offset:code_offset + code_size]
