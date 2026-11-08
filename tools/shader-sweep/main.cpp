@@ -300,16 +300,19 @@ public:
             cbuf_values.emplace(CbufKey(bank, offset), value);
             return value;
         }
+        return Find(cbuf_values, CbufKey(bank, offset), "constant buffer value",
+                    bank == 0 ? guesses.cbuf0 : guesses.cbuf_other);
+    }
+    /// A texture handle word: with the static context, a placeholder handle (translation needs
+    /// only the bound texture's type, see ReadTextureType below).
+    u32 ReadTextureHandleWord(u32 bank, u32 offset) override {
         if (static_context && (bank == StaticTextureBank || stage == Stage::Compute) &&
             bank != 1 && !cbuf_values.contains(CbufKey(bank, offset))) {
-            // A texture handle the draw binds: translation needs only its type and format
-            // class, which do not depend on the handle (see ReadTextureType below).
             const u32 handle = StaticHandleBase | (offset / 4);
             cbuf_values.emplace(CbufKey(bank, offset), handle);
             return handle;
         }
-        return Find(cbuf_values, CbufKey(bank, offset), "constant buffer value",
-                    bank == 0 ? guesses.cbuf0 : guesses.cbuf_other);
+        return ReadCbufValue(bank, offset);
     }
     /// Driver bank 1 holds the program's constant table: the code bytes from the offset in
     /// the control section's word at byte 64 to the end of the allocation.

@@ -314,10 +314,12 @@ def parse_sharcb(data):
                 struct.unpack_from("<I", control, 84)[0] >> 16 != expected_type):
             raise ArchiveError("BAHS record disagrees with the NVN2 control stage or version")
         declared, table_size, instruction_allocation, allocation = struct.unpack_from("<4I", control, 56)
-        if (not declared or declared % 16 or instruction_allocation % 16 or table_size % 4 or
-                not declared <= instruction_allocation <= instruction_allocation + table_size <= allocation or
+        if (not declared or declared % 16 or instruction_allocation % 16 or
+                not declared <= instruction_allocation <= allocation or
                 code_relative + allocation > pool_size):
             raise ArchiveError("invalid BAHS code extent")
+        if table_size % 4 or instruction_allocation + table_size > allocation:
+            table_size = 0  # a constant table that does not fit is left out, not the archive
         code_offset = pool + code_relative
         code_size = declared if stage == "compute" else instruction_allocation
         if table_size:

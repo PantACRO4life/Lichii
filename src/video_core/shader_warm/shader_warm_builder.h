@@ -40,6 +40,15 @@ std::filesystem::path WarmCountPath(const std::filesystem::path& warm_file);
 /// file of another size.
 u64 ReadWarmCount(const std::filesystem::path& warm_file);
 
+/// Revision of what the builder writes into warm files, recorded after the entry count and
+/// size. 1: bank 1 is the program's own constant table (before: the last 256 bytes of a graphics
+/// allocation, none for compute).
+constexpr u32 WarmFormat = 1;
+
+/// True when the builder wrote `warm_file` with an older WarmFormat (files from the offline
+/// tools have no count file and are not reported).
+bool WarmFileOutdated(const std::filesystem::path& warm_file);
+
 /// Removes the title's warm files, their markers and leftover temporary files (rebuild or delete
 /// from the UI). Returns false when a file exists but cannot be removed, with the reason in
 /// `error` when given.

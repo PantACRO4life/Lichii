@@ -724,13 +724,14 @@ std::vector<Record> ParseBahs(Bytes data) {
         const u64 code_size =
             info->stage == ProgramStage::Compute ? declared : instruction_allocation;
         const auto code = Extent(data, code_offset, code_size);
-        // The constant table follows the instructions, past the code extent.
+        // The constant table follows the instructions, past the code extent. One that does not
+        // fit is left out: its reads then count as guesses.
         const u64 constants_size = Le<u32>(control, 60);
-        if (constants_size % 4 || instruction_allocation + constants_size > allocation) {
-            throw ArchiveError("invalid BAHS constant table");
-        }
-        const Bytes constants =
-            constants_size ? Extent(data, code_offset + instruction_allocation, constants_size) : Bytes{};
+        const bool constants_ok =
+            constants_size % 4 == 0 && instruction_allocation + constants_size <= allocation;
+        const Bytes constants = constants_ok && constants_size
+                                    ? Extent(data, code_offset + instruction_allocation, constants_size)
+                                    : Bytes{};
         if (info->stage == ProgramStage::Task || info->stage == ProgramStage::Mesh) {
             const u32 header_type = HeaderType(code);
             const bool header_ok = info->stage == ProgramStage::Task

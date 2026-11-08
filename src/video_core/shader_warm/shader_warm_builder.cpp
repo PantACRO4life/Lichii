@@ -341,6 +341,20 @@ u64 ReadWarmCount(const fs::path& warm_file) {
     return !ec && actual == size ? entries : 0;
 }
 
+bool WarmFileOutdated(const fs::path& warm_file) {
+    std::ifstream in(WarmCountPath(warm_file));
+    u64 entries{};
+    u64 size{};
+    if (!(in >> entries >> size)) {
+        return false;
+    }
+    u32 format{};
+    if (!(in >> format)) {
+        format = 0;
+    }
+    return format < WarmFormat;
+}
+
 namespace {
 /// Records `entries` for the finished warm file at `warm_file` (see WarmCountPath).
 void WriteWarmCount(const fs::path& warm_file, u64 entries) {
@@ -350,7 +364,7 @@ void WriteWarmCount(const fs::path& warm_file, u64 entries) {
         return;
     }
     std::ofstream out(WarmCountPath(warm_file), std::ios::trunc);
-    out << entries << ' ' << size << '\n';
+    out << entries << ' ' << size << ' ' << WarmFormat << '\n';
 }
 } // Anonymous namespace
 

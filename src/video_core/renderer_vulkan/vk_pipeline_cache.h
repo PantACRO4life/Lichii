@@ -117,6 +117,9 @@ struct ComputePipelineCacheEntry {
     std::vector<std::pair<u32, u32>> null_pointer_slots;
     /// Constant buffer slots bound as storage buffer pointers (see MappedStoragePointerKeys)
     std::vector<u64> mapped_pointers;
+    /// Built at boot from the game files: the environment whose rule answers the first dispatch
+    /// checks (FileEnvironment::CheckDispatch) before the pipeline is kept and cached.
+    std::unique_ptr<VideoCommon::FileEnvironment> prebuilt;
     u32 rebuilds{};
 
     [[nodiscard]] ComputePipeline* Get(bool native, GPUVAddr address,
