@@ -109,6 +109,7 @@ public:
         u32 stage;
         bool storage;
         u32 index;
+        bool vertex{};
         bool written;
         GPUVAddr gpu_addr;
         u64 device_addr;
