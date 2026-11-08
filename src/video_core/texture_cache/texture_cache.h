@@ -146,18 +146,48 @@ void TextureCache<P>::DeleteDeadOverlaps() {
     if (frame_tick <= MinFramesUnused) {
         return;
     }
+    // An image the GPU wrote is deleted without a download, so only once the newer images cover
+    // all of its memory: the part they don't cover still holds contents nothing else has.
+    // EDEN_NX2_TC_DEAD_OVERLAPS_ALL=1 deletes it whatever they cover.
+    static const bool delete_all = std::getenv("EDEN_NX2_TC_DEAD_OVERLAPS_ALL") != nullptr;
     dead_overlap_ids.clear();
     lru_cache.ForEachItemBelow(frame_tick - MinFramesUnused, [this](ImageId image_id) {
         const Image& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
+        boost::container::small_vector<std::pair<u64, u64>, 8> newer;
         for (const ImageId overlap_id : image.overlapping_images) {
-            if (slot_images[overlap_id].last_use_frame > image.last_use_frame) {
-                dead_overlap_ids.push_back(image_id);
-                break;
+            const Image& overlap = slot_images[overlap_id];
+            if (overlap.last_use_frame > image.last_use_frame) {
+                newer.emplace_back(overlap.cpu_addr, overlap.cpu_addr_end);
             }
         }
+        if (newer.empty()) {
+            return false;
+        }
+        if (True(image.flags & ImageFlagBits::GpuModified) && !delete_all) {
+            std::ranges::sort(newer);
+            u64 covered = image.cpu_addr;
+            for (const auto& [begin, end] : newer) {
+                if (begin > covered) {
+                    break;
+                }
+                covered = (std::max)(covered, end);
+            }
+            if (covered < image.cpu_addr_end) {
+                static bool logged = false;
+                if (!std::exchange(logged, true)) {
+                    LOG_INFO(HW_GPU,
+                             "Kept a GPU-written image newer images only partly cover: {:#x} "
+                             "({} bytes, {}x{}, format {})",
+                             image.gpu_addr, image.guest_size_bytes, image.info.size.width,
+                             image.info.size.height, static_cast<u32>(image.info.format));
+                }
+                return false;
+            }
+        }
+        dead_overlap_ids.push_back(image_id);
         return false;
     });
     for (const ImageId image_id : dead_overlap_ids) {
