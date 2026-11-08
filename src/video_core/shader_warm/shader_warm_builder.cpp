@@ -168,6 +168,7 @@ struct Job {
     u32 stage{};
     size_t graphics_index{};
     std::vector<u8> program;
+    std::vector<u8> constants;
     ComputeControl control{};
 };
 
@@ -272,9 +273,10 @@ private:
             }
             if (job.graphics) {
                 result.hash = StageHash(lowered.code);
-                result.bytes = GraphicsEnv(job.stage, lowered, job.program);
+                result.bytes = GraphicsEnv(job.stage, lowered, job.program, job.constants);
             } else {
-                result.bytes = ComputeEntry(lowered, job.control, result.compute_key);
+                result.bytes =
+                    ComputeEntry(lowered, job.control, job.constants, result.compute_key);
             }
             result.ok = true;
         } catch (const std::exception& e) {
@@ -339,6 +341,20 @@ u64 ReadWarmCount(const fs::path& warm_file) {
     return !ec && actual == size ? entries : 0;
 }
 
+bool WarmFileOutdated(const fs::path& warm_file) {
+    std::ifstream in(WarmCountPath(warm_file));
+    u64 entries{};
+    u64 size{};
+    if (!(in >> entries >> size)) {
+        return false;
+    }
+    u32 format{};
+    if (!(in >> format)) {
+        format = 0;
+    }
+    return format < WarmFormat;
+}
+
 namespace {
 /// Records `entries` for the finished warm file at `warm_file` (see WarmCountPath).
 void WriteWarmCount(const fs::path& warm_file, u64 entries) {
@@ -348,7 +364,7 @@ void WriteWarmCount(const fs::path& warm_file, u64 entries) {
         return;
     }
     std::ofstream out(WarmCountPath(warm_file), std::ios::trunc);
-    out << entries << ' ' << size << '\n';
+    out << entries << ' ' << size << ' ' << WarmFormat << '\n';
 }
 } // Anonymous namespace
 
@@ -629,6 +645,7 @@ Result BuildWarmFilesWith(Core::System& system, const fs::path& game_path, u64 t
             }
             job.seq = seq++;
             job.program.assign(record.code.begin(), record.code.end());
+            job.constants.assign(record.constants.begin(), record.constants.end());
             job_kinds.emplace_back(job.graphics, job.graphics_index);
             converter->Push(std::move(job));
             while (converter->Pending() > MaxPendingJobs && !stop.stop_requested()) {
