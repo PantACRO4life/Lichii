@@ -12,6 +12,7 @@
 #include <bit>
 #include <optional>
 #include "common/container/unordered_map.h"
+#include <map>
 #include <tuple>
 #include <limits>
 #include <boost/container/small_vector.hpp>
@@ -1212,13 +1213,23 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
     // A handle program has no descriptor to read a type from, and ImageQueryDimensions carries
     // none: it takes the type of another instruction using the same handle.
     std::unordered_map<u32, TextureType> handle_program_types;
+    // Without descriptors, a query takes the type of a sampling instruction on the same handle.
+    const auto handle_slot = [](const ConstBufferAddr& addr) {
+        return std::tuple{addr.index, addr.offset, addr.shift_left, addr.has_secondary,
+                          addr.secondary_index, addr.secondary_offset, addr.secondary_shift_left};
+    };
+    std::map<decltype(handle_slot(ConstBufferAddr{})), TextureType> slot_types;
+    const bool has_descriptors{env.CanReadTextureDescriptors()};
     for (const TextureInst& texture_inst : to_replace) {
         const IR::Opcode opcode{IndexedInstruction(*texture_inst.inst)};
-        if (texture_inst.cbuf.handle_program != ~0U && opcode != IR::Opcode::ImageQueryDimensions &&
-            !IsStorageImageOpcode(opcode)) {
-            handle_program_types.try_emplace(
-                texture_inst.cbuf.handle_program,
-                texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value());
+        if (opcode == IR::Opcode::ImageQueryDimensions || IsStorageImageOpcode(opcode)) {
+            continue;
+        }
+        const TextureType type{texture_inst.inst->Flags<IR::TextureInstInfo>().type.Value()};
+        if (texture_inst.cbuf.handle_program != ~0U) {
+            handle_program_types.try_emplace(texture_inst.cbuf.handle_program, type);
+        } else if (!has_descriptors && texture_inst.cbuf.count == 1) {
+            slot_types.try_emplace(handle_slot(texture_inst.cbuf), type);
         }
     }
     for (TextureInst& texture_inst : to_replace) {
@@ -1235,6 +1246,15 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             if (const auto it{handle_program_types.find(cbuf.handle_program)};
                 it != handle_program_types.end()) {
                 flags.type.Assign(it->second);
+            } else if (!has_descriptors) {
+                const auto slot{slot_types.find(handle_slot(cbuf))};
+                if (cbuf.handle_program != ~0U || slot == slot_types.end()) {
+                    throw NotImplementedException(
+                        "Texture query type needs a descriptor (cbuf {} offset {:#x})", cbuf.index,
+                        cbuf.offset);
+                }
+                flags.type.Assign(slot->second);
+                env.NoteInferredTextureType(GetTextureHandleCached(env, cbuf), slot->second);
             } else {
                 flags.type.Assign(ReadTextureTypeCached(env, cbuf));
             }

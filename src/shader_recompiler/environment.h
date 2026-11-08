@@ -108,6 +108,14 @@ public:
 
     [[nodiscard]] virtual TextureType ReadTextureType(u32 raw_handle) = 0;
 
+    /// False when texture descriptors are unavailable (translation ahead of time, before any
+    /// draw binds them): types then come from the program's own texture instructions.
+    [[nodiscard]] virtual bool CanReadTextureDescriptors() const { return true; }
+
+    /// Without descriptors, reports a type taken from the program's own texture instructions,
+    /// so an ahead-of-time environment can store it as that handle's descriptor type.
+    virtual void NoteInferredTextureType(u32 raw_handle, TextureType type) {}
+
     [[nodiscard]] virtual TexturePixelFormat ReadTexturePixelFormat(u32 raw_handle) = 0;
 
     [[nodiscard]] virtual bool IsTexturePixelFormatInteger(u32 raw_handle) = 0;
