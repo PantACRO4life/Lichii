@@ -2879,23 +2879,38 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
     // (ResolveDeferredRtRefreshes runs them with the upload); overlaps merged into the image can't,
     // they get deleted.
     // A new render target over memory whose last contents only the GPU has: the guest bytes are
-    // stale, and a target newly placed in that memory has no defined contents anyway.
+    // stale, and a target newly placed in that memory has no defined contents anyway. It is
+    // cleared to zero rather than left with whatever its host memory held (freed images and
+    // buffers, which can read as NaN); where that can't be done it is uploaded as before.
     const bool over_gpu_contents =
         inserting_render_target && join_copies_to_do.empty() &&
         std::ranges::any_of(join_bad_overlap_ids, [this](ImageId overlap_id) {
             return True(slot_images[overlap_id].flags & ImageFlagBits::GpuModified);
         });
+    bool zeroed = false;
+    if constexpr (requires { runtime.ZeroImage(new_image); }) {
+        if (over_gpu_contents) {
+            zeroed = runtime.ZeroImage(new_image);
+            static std::array<bool, 2> logged{};
+            if (!std::exchange(logged[zeroed ? 1 : 0], true)) {
+                LOG_INFO(HW_GPU,
+                         "New render target over GPU contents {}: {:#x} ({} bytes, {}x{}, format {})",
+                         zeroed ? "cleared to zero" : "uploaded", gpu_addr,
+                         new_image.guest_size_bytes, new_info.size.width, new_info.size.height,
+                         static_cast<u32>(new_info.format));
+            }
+        }
+    }
     const bool deferred_refresh =
         !over_gpu_contents && defer_rt_refresh &&
         std::ranges::all_of(join_copies_to_do, [](const JoinCopy& copy) {
             return copy.is_alias;
         });
-    if (over_gpu_contents) {
+    if (zeroed) {
         new_image.flags &= ~ImageFlagBits::CpuModified;
         if (False(new_image.flags & ImageFlagBits::Tracked)) {
             TrackImage(new_image, new_image_id);
         }
-        runtime.TransitionImageLayout(new_image);
     } else if (deferred_refresh) {
         deferred_rt_refreshes.push_back(new_image_id);
         runtime.TransitionImageLayout(new_image);

@@ -194,6 +194,10 @@ public:
 
     void TransitionImageLayout(Image& image);
 
+    /// Clears every texel of the image to zero (an image no upload or clear will fill).
+    /// False when it can't (compressed, unbacked or bufferless images); the layout is set then.
+    bool ZeroImage(Image& image);
+
     bool HasBrokenTextureViewFormats() const noexcept {
         // No known Vulkan driver has broken image views
         return false;
