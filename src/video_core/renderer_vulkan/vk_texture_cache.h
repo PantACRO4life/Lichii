@@ -441,6 +441,21 @@ public:
     /// once it ends.
     void MarkResolveShadowsUpToDate() const;
 
+    /// Dynamic rendering (Device::IsGplDynamicRendering): the attachment of a render target slot
+    /// (null when the slot has none) and the depth/stencil attachment.
+    [[nodiscard]] VkImageView ColorView(size_t slot) const noexcept {
+        return color_views[slot];
+    }
+
+    [[nodiscard]] VkImageView DepthView() const noexcept {
+        return depth_view;
+    }
+
+    /// Highest render target slot with a color buffer, plus one.
+    [[nodiscard]] u32 NumColorSlots() const noexcept {
+        return num_color_slots;
+    }
+
 private:
     static constexpr size_t NUM_MEMOIZED_RENDER_PASS_VARIANTS = 8;
 
@@ -464,6 +479,9 @@ private:
     RenderPassCache* render_pass_cache{nullptr};
     bool discard_msaa_color{};
     bool discard_msaa_depth_stencil{};
+    std::array<VkImageView, NUM_RT> color_views{};
+    VkImageView depth_view{};
+    u32 num_color_slots = 0;
     mutable std::array<u32, NUM_MEMOIZED_RENDER_PASS_VARIANTS> variant_keys{};
     mutable std::array<VkRenderPass, NUM_MEMOIZED_RENDER_PASS_VARIANTS> variant_render_passes{};
     mutable u32 num_memoized_variants{};

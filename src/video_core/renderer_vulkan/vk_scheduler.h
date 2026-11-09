@@ -101,8 +101,10 @@ public:
     /// Sends currently recorded work to the worker thread.
     void DispatchWork();
 
-    /// Requests to begin a renderpass.
-    void RequestRenderpass(const Framebuffer* framebuffer,
+    /// Requests to begin a renderpass. `dynamic`: a dynamic rendering instance
+    /// (vkCmdBeginRendering) into the framebuffer's attachments instead of its render pass, for
+    /// pipelines made without a render pass (Device::IsGplDynamicRendering).
+    void RequestRenderpass(const Framebuffer* framebuffer, bool dynamic = false,
                            std::source_location location = std::source_location::current());
 
     /// Defers a full-attachment color clear so it becomes the next render pass.
@@ -423,6 +425,7 @@ private:
         bool needs_state_enable_refresh = false;
         u32 descriptor_buffer_chunk = 0;
         bool descriptor_buffer_bound = false;
+        bool dynamic_rendering = false;
     };
 
     struct DeferredClear {
@@ -437,8 +440,15 @@ private:
     void BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass renderpass,
                              const VkClearValue* clear_values, u32 clear_value_count);
 
-    /// If a deferred clear is pending.
-    void RealizeDeferredClear();
+    /// Begins a dynamic rendering instance into the framebuffer's attachments. Slots in
+    /// `color_clear_mask` (and depth/stencil with `depth_stencil_clear`) are cleared to the given
+    /// values, as a deferred clear's render pass variant does; the rest are loaded.
+    void BeginRenderingImpl(const Framebuffer* framebuffer, u32 color_clear_mask,
+                            const std::array<VkClearValue, 8>* color_values,
+                            bool depth_stencil_clear, VkClearValue depth_stencil_value);
+
+    /// If a deferred clear is pending. `dynamic`: realized as a dynamic rendering instance.
+    void RealizeDeferredClear(bool dynamic = false);
 
     void WorkerThread(std::stop_token stop_token);
 

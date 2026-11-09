@@ -309,6 +309,7 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     const VkExtent2D render_area = framebuffer->RenderArea();
     ++render_pass_serial;
     state.renderpass = renderpass;
+    state.dynamic_rendering = false;
     state.framebuffer = framebuffer_handle;
     state.render_area = render_area;
 
@@ -359,12 +360,97 @@ void Scheduler::BeginRenderPassImpl(const Framebuffer* framebuffer, VkRenderPass
     framebuffer->MarkResolveShadowsUpToDate();
 }
 
-void Scheduler::RealizeDeferredClear() {
+void Scheduler::BeginRenderingImpl(const Framebuffer* framebuffer, u32 color_clear_mask,
+                                   const std::array<VkClearValue, 8>* color_values,
+                                   bool depth_stencil_clear, VkClearValue depth_stencil_value) {
+    if (VideoCommon::Nx2Profile::Enabled()) {
+        g_profile_renderpasses.fetch_add(1, std::memory_order_relaxed);
+    }
+    const VkExtent2D render_area = framebuffer->RenderArea();
+    ++render_pass_serial;
+    // The framebuffer's render pass stays the "a pass is active" mark (IsRenderPassActive).
+    state.renderpass = framebuffer->RenderPass();
+    state.dynamic_rendering = true;
+    state.framebuffer = framebuffer->Handle();
+    state.render_area = render_area;
+
+    struct Attachments {
+        std::array<VkRenderingAttachmentInfo, 8> colors;
+        VkRenderingAttachmentInfo depth_stencil;
+        u32 num_colors;
+        u32 layers;
+        bool has_depth;
+        bool has_stencil;
+    } att{};
+    const auto make = [](VkImageView view, bool clear, const VkClearValue& value) {
+        return VkRenderingAttachmentInfo{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .pNext = nullptr,
+            .imageView = view,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .resolveMode = VK_RESOLVE_MODE_NONE,
+            .resolveImageView = VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = value,
+        };
+    };
+    att.num_colors = framebuffer->NumColorSlots();
+    for (u32 slot = 0; slot < att.num_colors; ++slot) {
+        const bool clear = (color_clear_mask & (1u << slot)) != 0;
+        att.colors[slot] = make(framebuffer->ColorView(slot), clear,
+                                color_values ? (*color_values)[slot] : VkClearValue{});
+    }
+    const bool has_view = framebuffer->DepthView() != VK_NULL_HANDLE;
+    att.has_depth = has_view && framebuffer->HasAspectDepthBit();
+    att.has_stencil = has_view && framebuffer->HasAspectStencilBit();
+    att.depth_stencil = make(framebuffer->DepthView(), depth_stencil_clear, depth_stencil_value);
+    att.layers = framebuffer->Layers();
+    const bool after_compute = std::exchange(compute_writes_pending, false);
+    Record([att, render_area, after_compute](vk::CommandBuffer cmdbuf) {
+        if (after_compute) {
+            // As in BeginRenderPassImpl: order the draws' reads after the compute writes.
+            static constexpr VkMemoryBarrier COMPUTE_TO_GRAPHICS{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .pNext = nullptr,
+                .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+            };
+            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, COMPUTE_TO_GRAPHICS);
+        }
+        const VkRenderingInfo rendering_info{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .renderArea = {.offset = {.x = 0, .y = 0}, .extent = render_area},
+            .layerCount = att.layers,
+            .viewMask = 0,
+            .colorAttachmentCount = att.num_colors,
+            .pColorAttachments = att.colors.data(),
+            .pDepthAttachment = att.has_depth ? &att.depth_stencil : nullptr,
+            .pStencilAttachment = att.has_stencil ? &att.depth_stencil : nullptr,
+        };
+        cmdbuf.BeginRendering(rendering_info);
+    });
+    num_renderpass_images = framebuffer->NumImages();
+    renderpass_images = framebuffer->Images();
+    renderpass_image_ranges = framebuffer->ImageRanges();
+}
+
+void Scheduler::RealizeDeferredClear(bool dynamic) {
     if (deferred_clear.framebuffer == nullptr) {
         return;
     }
     const DeferredClear dc = deferred_clear;
     deferred_clear = {};
+    if (dynamic) {
+        EndRenderPass();
+        BeginRenderingImpl(dc.framebuffer, dc.color_clear_mask, &dc.color_values,
+                           dc.depth_stencil, dc.depth_stencil_value);
+        return;
+    }
 
     std::array<VkClearValue, 9> clear_values{};
     u32 count = 0;
@@ -425,9 +511,10 @@ void Scheduler::FlushDeferredClear() {
     EndRenderPass();
 }
 
-void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_location location) {
+void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, bool dynamic,
+                                  std::source_location location) {
     if (deferred_clear.framebuffer == framebuffer) {
-        RealizeDeferredClear();
+        RealizeDeferredClear(dynamic);
         return;
     }
     const VkRenderPass renderpass = framebuffer->RenderPass();
@@ -442,7 +529,7 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     // so it is the correct identity to compare.
     if (state.renderpass && framebuffer_handle == state.framebuffer &&
         render_area.width == state.render_area.width &&
-        render_area.height == state.render_area.height) {
+        render_area.height == state.render_area.height && dynamic == state.dynamic_rendering) {
         return;
     }
     if (state.renderpass) {
@@ -450,7 +537,11 @@ void Scheduler::RequestRenderpass(const Framebuffer* framebuffer, std::source_lo
     }
     // Ends any active pass and realizes a deferred clear
     EndRenderPass();
-    BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
+    if (dynamic) {
+        BeginRenderingImpl(framebuffer, 0, nullptr, false, VkClearValue{});
+    } else {
+        BeginRenderPassImpl(framebuffer, renderpass, nullptr, 0);
+    }
 }
 
 void Scheduler::RequestOutsideRenderPassOperationContext(std::source_location location) {
@@ -908,7 +999,8 @@ void Scheduler::EndRenderPass()
         Record([num_images = num_renderpass_images,
                        images = renderpass_images,
                        ranges = renderpass_image_ranges,
-                       has_transform_feedback = device.IsExtTransformFeedbackSupported()](
+                       has_transform_feedback = device.IsExtTransformFeedbackSupported(),
+                       dynamic_rendering = state.dynamic_rendering](
                           vk::CommandBuffer cmdbuf) {
             std::array<VkImageMemoryBarrier, 9> barriers;
             for (size_t i = 0; i < num_images; ++i) {
@@ -945,7 +1037,11 @@ void Scheduler::EndRenderPass()
                         .subresourceRange = range,
                 };
             }
-            cmdbuf.EndRenderPass();
+            if (dynamic_rendering) {
+                cmdbuf.EndRendering();
+            } else {
+                cmdbuf.EndRenderPass();
+            }
             cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, vk::PIPELINE_STAGE_GRAPHICS_COMPUTE,
                                    0, nullptr, nullptr, vk::Span(barriers.data(), num_images));
@@ -963,6 +1059,7 @@ void Scheduler::EndRenderPass()
         });
 
         state.renderpass = VkRenderPass{};
+        state.dynamic_rendering = false;
         num_renderpass_images = 0;
     }
 
