@@ -403,9 +403,11 @@ void DefineEntryPoint(const IR::Program& program, EmitContext& ctx, Id main) {
 void SetupDenormControl(const Profile& profile, const IR::Program& program, EmitContext& ctx,
                         Id main_func) {
     const Info& info{program.info};
-    if (info.uses_fp32_denorms_flush && info.uses_fp32_denorms_preserve) {
-        LOG_DEBUG(Shader_SPIRV, "Fp32 denorm flush and preserve on the same shader");
-    } else if (info.uses_fp32_denorms_flush) {
+    // A shader with both: flush. The game's own float math carries .FTZ; the ops without it are
+    // mostly helpers the native lowering adds (clamps, NaN checks, angle scaling). Leaving the
+    // mode to the driver let tiny values survive where the hardware flushes them to zero, and
+    // log2/sqrt/rsqrt of a tiny negative then gave NaN (white areas in Ocarina of Time).
+    if (info.uses_fp32_denorms_flush) {
         if (profile.support_fp32_denorm_flush && !profile.has_broken_fp32_denorm_flush) {
             ctx.AddCapability(spv::Capability::DenormFlushToZero);
             ctx.AddExecutionMode(main_func, spv::ExecutionMode::DenormFlushToZero, 32U);
@@ -445,10 +447,10 @@ void SetupDenormControl(const Profile& profile, const IR::Program& program, Emit
 
 void SetupSignedNanCapabilities(const Profile& profile, const IR::Program& program,
                                 EmitContext& ctx, Id main_func) {
-    if (profile.has_broken_fp16_float_controls && program.info.uses_fp16) {
-        return;
-    }
-    if (program.info.uses_fp16 && profile.support_fp16_signed_zero_nan_preserve) {
+    // Broken fp16 float controls (NVIDIA): skip only the 16-bit mode. Returning early here also
+    // dropped the 32-bit one, so the driver could assume no NaN or Inf in any shader using fp16.
+    const bool fp16_controls = !(profile.has_broken_fp16_float_controls && program.info.uses_fp16);
+    if (fp16_controls && program.info.uses_fp16 && profile.support_fp16_signed_zero_nan_preserve) {
         ctx.AddCapability(spv::Capability::SignedZeroInfNanPreserve);
         ctx.AddExecutionMode(main_func, spv::ExecutionMode::SignedZeroInfNanPreserve, 16U);
     }
