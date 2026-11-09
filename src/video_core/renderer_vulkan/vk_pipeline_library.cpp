@@ -46,9 +46,12 @@ std::shared_ptr<const GplLibrary> GraphicsPipelineLibraryCache::GetOrCreate(
     bool owner = false;
     {
         std::scoped_lock lock{mutex};
-        auto [it, inserted] = entries.try_emplace(key);
-        if (inserted) {
-            it->second = std::make_shared<Entry>();
+        auto it = entries.find(key);
+        if (it == entries.end()) {
+            // Construct before publishing: allocation failure must not leave a null entry
+            // that the next caller would dereference.
+            auto fresh = std::make_shared<Entry>();
+            it = entries.emplace(key, std::move(fresh)).first;
             owner = true;
         }
         entry = it->second;

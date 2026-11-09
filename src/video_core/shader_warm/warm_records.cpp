@@ -275,7 +275,7 @@ RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches) 
             const u32 count = Get<u32>(bytes, cur);
             cur += 4;
             envs.clear();
-            bool truncated = count == 0;
+            bool truncated = count == 0 || count > 6;
             for (u32 i = 0; i < count && !truncated; ++i) {
                 if (cur + EnvHeaderSize > size) {
                     truncated = true;
@@ -284,10 +284,24 @@ RuntimeStats ReadRuntimeStats(const std::vector<std::filesystem::path>& caches) 
                 std::array<u64, 6> counts;
                 std::memcpy(counts.data(), data.data() + cur, sizeof(counts));
                 const u32 stage = Get<u32>(bytes, cur + 48 + 6 * 4);
-                const u64 body = counts[0] + counts[1] * 8 + counts[2] * 8 + counts[3] * 12 +
-                                 counts[4] * 9 + counts[5] * 12 + TailSize(stage);
-                if (body > size - cur - EnvHeaderSize) {
+                u64 left = size - cur - EnvHeaderSize;
+                u64 body = TailSize(stage);
+                if (body > left) {
                     truncated = true;
+                    break;
+                }
+                left -= body;
+                constexpr std::array<u64, 6> strides{1, 8, 8, 12, 9, 12};
+                for (size_t field = 0; field < counts.size(); ++field) {
+                    if (counts[field] > left / strides[field]) {
+                        truncated = true;
+                        break;
+                    }
+                    const u64 bytes = counts[field] * strides[field];
+                    body += bytes;
+                    left -= bytes;
+                }
+                if (truncated) {
                     break;
                 }
                 const size_t begin = cur;

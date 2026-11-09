@@ -37,6 +37,7 @@
 #include "video_core/shader_notify.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/vulkan_common/vulkan_device.h"
+#include "video_core/vulkan_common/graphics_pipeline_library_policy.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "common/settings.h"
 #include "shader_recompiler/exception.h"
@@ -65,6 +66,7 @@ using VideoCore::Surface::PixelFormatFromDepthFormat;
 using VideoCore::Surface::PixelFormatFromRenderTargetFormat;
 
 constexpr size_t NUM_STAGES = Maxwell::MaxShaderStage;
+static_assert(NUM_STAGES == GraphicsPipelineLibraryDescriptorSetCount);
 
 // The stage of a program: task and mesh programs sit in the vertex and tessellation slots.
 VkShaderStageFlagBits StageFlag(const Shader::Info& info, VkShaderStageFlagBits slot_stage) {

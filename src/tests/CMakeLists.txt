@@ -72,6 +72,8 @@ add_executable(tests
     video_core/async_draw_policy.cpp
     video_core/async_shader_emission.cpp
     video_core/pipeline_build.cpp
+    video_core/graphics_pipeline_library_cache.cpp
+    video_core/graphics_pipeline_library_policy.cpp
     video_core/oot_network.cpp
     video_core/page_filter.cpp
     video_core/pipeline_optimization.cpp

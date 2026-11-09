@@ -68,6 +68,27 @@ TEST_CASE("ShaderPrecache: launch requests are taken once", "[video_core]") {
     REQUIRE(ShaderWarm::TakeWarmBeforeStart());
 }
 
+TEST_CASE("ShaderPrecache: overflowed environment counts cannot become draw-state guesses",
+          "[video_core][gpl]") {
+    TempDir dir;
+    const auto file = dir.path / "overflow.bin";
+    std::string bytes(12 + 4 + 76 + 80 + ShaderWarm::GraphicsKeySize, '\0');
+    const auto put = [&bytes]<typename T>(size_t offset, T value) {
+        std::memcpy(bytes.data() + offset, &value, sizeof(value));
+    };
+    std::memcpy(bytes.data(), "yuzucach", 8);
+    put(8, ShaderWarm::WarmCacheVersion);
+    put(12, u32{1});
+    // The old count * 8 overflowed to zero, admitting a bogus complete environment.
+    put(16 + 8, u64{1} << 61);
+    put(16 + 76 + 80 + 8, u64{1}); // vertex program hash
+    WriteBytes(file, bytes);
+    const auto stats = ShaderWarm::ReadRuntimeStats({file});
+    CHECK(stats.occurrences == 0);
+    CHECK_FALSE(stats.templates[0]);
+    CHECK_FALSE(stats.templates[1]);
+}
+
 TEST_CASE("ShaderPrecache: the marker matches only the same file and driver", "[video_core]") {
     TempDir dir;
     const auto warm = dir.path / "warm-compute.bin";
