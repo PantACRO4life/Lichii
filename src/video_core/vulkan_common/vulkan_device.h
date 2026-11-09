@@ -740,6 +740,14 @@ FN_MAX_LIMIT_LIST
         return graphics_pipeline_library_enabled;
     }
 
+    /// With graphics pipeline libraries: every 3D pipeline (libraries, links and monolithic ones)
+    /// is made for dynamic rendering (no render pass) and the rasterizer's draws are recorded
+    /// inside vkCmdBeginRendering, so a shader library does not depend on the render targets.
+    /// Default on RADV only; EDEN_NX2_GPL_DYNAMIC_RENDERING=0/1 overrides it; never on tilers.
+    bool IsGplDynamicRendering() const {
+        return gpl_dynamic_rendering;
+    }
+
     /// Returns true if the device supports task and mesh shaders (VK_EXT_mesh_shader).
     bool IsExtMeshShaderSupported() const {
         return extensions.mesh_shader && features.mesh_shader.taskShader &&
@@ -1399,6 +1407,10 @@ private:
     bool graphics_pipeline_library_requested{};
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT graphics_pipeline_library_features{};
     bool graphics_pipeline_library_enabled{};
+    /// Chained only with EDEN_NX2_GPL on a Vulkan 1.3 device; its feature stays off unless
+    /// gpl_dynamic_rendering.
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_rendering_features{};
+    bool gpl_dynamic_rendering{};
 
     VkPhysicalDeviceFeatures2 features2{};
     VkPhysicalDeviceFaultFeaturesEXT device_fault_features{};

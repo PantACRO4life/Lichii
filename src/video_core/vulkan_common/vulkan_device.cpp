@@ -1389,6 +1389,13 @@ bool Device::GetSuitability(bool requires_swapchain) {
         graphics_pipeline_library_features.sType =
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT;
         SetNext(next, graphics_pipeline_library_features);
+        // Libraries made for dynamic rendering (IsGplDynamicRendering): Vulkan 1.3 only, so the
+        // core vkCmdBeginRendering entry points are there.
+        if (instance_version >= VK_API_VERSION_1_3) {
+            dynamic_rendering_features.sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+            SetNext(next, dynamic_rendering_features);
+        }
     }
 
     // Perform the feature test.
@@ -1802,6 +1809,33 @@ void Device::RemoveUnsuitableExtensions() {
                      "interpolation decoration {})",
                      properties.graphics_pipeline_library
                          .graphicsPipelineLibraryIndependentInterpolationDecoration);
+        }
+        // Dynamic rendering for the library path: the shader libraries are made without a render
+        // pass, so they do not depend on the render targets (RADV keys every library by the
+        // render pass's color formats). Vulkan wants the libraries and the linked pipeline to
+        // agree on it (VUID-VkGraphicsPipelineCreateInfo-renderpass-06624/06625, pLibraries-06628),
+        // so every 3D pipeline is then made for dynamic rendering and drawn inside
+        // vkCmdBeginRendering. On by default on RADV only; EDEN_NX2_GPL_DYNAMIC_RENDERING=0/1
+        // overrides that. Never on tilers: their MSAA resolves need a render pass.
+        const char* const dynamic_env = std::getenv("EDEN_NX2_GPL_DYNAMIC_RENDERING");
+        const bool dynamic_forced =
+            dynamic_env != nullptr && (dynamic_env[0] == '0' || dynamic_env[0] == '1');
+        const VkDriverIdKHR driver = GetDriverID();
+        const bool dynamic_wanted =
+            dynamic_forced ? dynamic_env[0] == '1' : driver == VK_DRIVER_ID_MESA_RADV;
+        const bool tiler = IsTiler() || IsMoltenVK() ||
+                           driver == VK_DRIVER_ID_IMAGINATION_PROPRIETARY ||
+                           driver == VK_DRIVER_ID_MESA_PANVK || driver == VK_DRIVER_ID_MESA_V3DV;
+        gpl_dynamic_rendering = usable && dynamic_wanted && !tiler &&
+                                instance_version >= VK_API_VERSION_1_3 &&
+                                dynamic_rendering_features.dynamicRendering;
+        if (!gpl_dynamic_rendering) {
+            dynamic_rendering_features.dynamicRendering = VK_FALSE;
+        }
+        if (usable && dynamic_wanted) {
+            LOG_INFO(Render_Vulkan, "Nx2Perf gpl: libraries for dynamic rendering {}",
+                     gpl_dynamic_rendering ? "on"
+                                           : "off (tiler, or no Vulkan 1.3 dynamic rendering)");
         }
     }
 
