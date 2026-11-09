@@ -115,7 +115,7 @@ TEST_CASE("FP32 min and max retain their denormal controls through SPIR-V emissi
     }
 }
 
-TEST_CASE("Min max controls obey existing mixed denormal policy",
+TEST_CASE("Min max controls with mixed denormal modes flush",
           "[video_core][spirv][min_max_denorms]") {
     for (const auto other : {IR::Opcode::FPMax32, IR::Opcode::FPAdd32}) {
         Program fixture;
@@ -124,8 +124,8 @@ TEST_CASE("Min max controls obey existing mixed denormal policy",
         fixture.Collect();
         CHECK(fixture.program.info.uses_fp32_denorms_flush);
         CHECK(fixture.program.info.uses_fp32_denorms_preserve);
-        // The existing emitter declines to select a shader-wide mode when both are requested.
-        CheckModes(fixture, false, false);
+        // A shader with both flushes: the game's float math carries .FTZ, the others are helpers.
+        CheckModes(fixture, true, false);
     }
 }
 
