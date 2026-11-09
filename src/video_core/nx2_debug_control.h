@@ -34,6 +34,9 @@ struct GpuReadRequest {
     u64 id;
     u64 gpu_address;
     u64 size;
+    /// Instead of reading: zero the range in the GPU buffer cache (host copy and guest memory),
+    /// for experiments on GPU-written data. Returns no bytes.
+    bool clear{};
 };
 
 struct GpuReadResult {

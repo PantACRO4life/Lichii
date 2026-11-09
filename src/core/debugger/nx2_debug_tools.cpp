@@ -570,7 +570,9 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     static_cast<void>(FormatMemory(std::span<const u8>{}, as));
     const u64 id = ++state.gpu_reads;
     const int timeout = Param<int>(params, "timeout_s", 5, 1, 60);
-    VideoCore::Nx2Debug::RequestGpuRead({.id = id, .gpu_address = address, .size = size});
+    const bool clear = params.value("clear", false);
+    VideoCore::Nx2Debug::RequestGpuRead(
+        {.id = id, .gpu_address = address, .size = size, .clear = clear});
     const auto read = VideoCore::Nx2Debug::WaitGpuRead(id, std::chrono::seconds{timeout});
     if (!read) {
         VideoCore::Nx2Debug::CancelGpuRead(id);
@@ -583,6 +585,10 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     json result = {{"gpu_address", HexAddress(address)},
                    {"size", size},
                    {"address_space", read->address_space}};
+    if (clear) {
+        result["cleared"] = true;
+        return result;
+    }
     result.update(FormatMemory(read->bytes, as));
     return result;
 }

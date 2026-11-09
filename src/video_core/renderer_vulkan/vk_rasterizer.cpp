@@ -2875,6 +2875,23 @@ void RasterizerVulkan::TickFrame() {
             VideoCore::Nx2Debug::NoteRejectApplied(change->generation);
         }
         while (const auto read = VideoCore::Nx2Debug::TakeGpuRead()) {
+            if (read->clear) {
+                VideoCore::Nx2Debug::GpuReadResult result{};
+                bool cleared = false;
+                if (gpu_memory != nullptr && read->size >= 4) {
+                    const std::vector<u8> zeros(read->size, 0);
+                    gpu_memory->WriteBlockUnsafe(read->gpu_address, zeros.data(), zeros.size());
+                    std::scoped_lock lock{buffer_cache.mutex};
+                    cleared = buffer_cache.DMAClear(read->gpu_address, read->size / 4, 0);
+                }
+                LOG_INFO(Render_Vulkan, "Nx2Debug: cleared {:#x} size {:#x} (cached buffer {})",
+                         read->gpu_address, read->size, cleared ? "cleared" : "not registered");
+                if (!cleared) {
+                    result.error = "range is not a registered GPU buffer; guest memory zeroed only";
+                }
+                VideoCore::Nx2Debug::FinishGpuRead(read->id, std::move(result));
+                continue;
+            }
             std::vector<Tegra::MemoryManager*> spaces;
             if (gpu_memory != nullptr) {
                 spaces.push_back(gpu_memory);
