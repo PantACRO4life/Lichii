@@ -203,6 +203,67 @@ RenderPassKey MakeRenderPassKey(const FixedPipelineState& state, const Device& d
     return key;
 }
 
+/// Attachment formats of a pipeline made for dynamic rendering (Device::IsGplDynamicRendering),
+/// by render target slot as the render pass of MakeRenderPassKey has them, with the formats the
+/// render pass cache gives its attachments (the framebuffer's views have those).
+struct RenderingFormats {
+    std::array<VkFormat, 8> colors{};
+    u32 num_colors{};
+    VkFormat depth{VK_FORMAT_UNDEFINED};
+    VkFormat stencil{VK_FORMAT_UNDEFINED};
+};
+
+RenderingFormats MakeRenderingFormats(const FixedPipelineState& state, const Device& device) {
+    using VideoCore::Surface::SurfaceType;
+    const RenderPassKey key{MakeRenderPassKey(state, device)};
+    RenderingFormats formats{};
+    for (size_t index = 0; index < key.color_formats.size(); ++index) {
+        if (key.color_formats[index] == PixelFormat::Invalid) {
+            continue;
+        }
+        formats.colors[index] =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, key.color_formats[index])
+                .format;
+        formats.num_colors = static_cast<u32>(index + 1);
+    }
+    if (key.depth_format != PixelFormat::Invalid) {
+        const VkFormat format =
+            MaxwellToVK::SurfaceFormat(device, FormatType::Optimal, true, key.depth_format).format;
+        const SurfaceType type = VideoCore::Surface::GetFormatType(key.depth_format);
+        if (type == SurfaceType::Depth || type == SurfaceType::DepthStencil) {
+            formats.depth = format;
+        }
+        if (type == SurfaceType::Stencil || type == SurfaceType::DepthStencil) {
+            formats.stencil = format;
+        }
+    }
+    return formats;
+}
+
+VkPipelineRenderingCreateInfo RenderingInfo(const RenderingFormats& formats) {
+    return {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .pNext = nullptr,
+        .viewMask = 0,
+        .colorAttachmentCount = formats.num_colors,
+        .pColorAttachmentFormats = formats.colors.data(),
+        .depthAttachmentFormat = formats.depth,
+        .stencilAttachmentFormat = formats.stencil,
+    };
+}
+
+/// A shader library made for dynamic rendering takes no attachment formats (Vulkan reads only the
+/// view mask for pre-rasterization and fragment shader state), so it serves every render target.
+constexpr VkPipelineRenderingCreateInfo SHADER_LIBRARY_RENDERING_CI{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+    .pNext = nullptr,
+    .viewMask = 0,
+    .colorAttachmentCount = 0,
+    .pColorAttachmentFormats = nullptr,
+    .depthAttachmentFormat = VK_FORMAT_UNDEFINED,
+    .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+};
+
 size_t NumAttachments(const FixedPipelineState& state) {
     size_t num{};
     for (size_t index = 0; index < Maxwell::NumRenderTargets; ++index) {
@@ -674,7 +735,12 @@ GraphicsPipeline::GraphicsPipeline(
             if (emit_stages) {
                 spv_modules = emit_stages(spirv_hashes);
             }
-            const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
+            // Dynamic rendering (libraries independent of the render targets): no render pass,
+            // for the monolithic route too, as every 3D draw is then inside vkCmdBeginRendering.
+            const VkRenderPass render_pass{
+                device.IsGplDynamicRendering()
+                    ? VK_NULL_HANDLE
+                    : render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
             Validate();
             if (library_cache) {
                 const bool has_module = std::ranges::any_of(
@@ -1596,7 +1662,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
         });
     }
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(texture_cache.GetFramebuffer(), device.IsGplDynamicRendering());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
     }
@@ -2305,9 +2371,12 @@ vk::Pipeline GraphicsPipeline::MakePipeline(VkRenderPass render_pass, bool fast)
     const bool unoptimized = (flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) != 0;
     const auto trace_begin = std::chrono::steady_clock::now();
     TracePipelineBuild("BEGIN", "graphics", key.Hash(), key.unique_hashes, unoptimized);
+    // No render pass (Device::IsGplDynamicRendering): the attachment formats instead.
+    const RenderingFormats rendering_formats{MakeRenderingFormats(key.state, device)};
+    const VkPipelineRenderingCreateInfo rendering_ci{RenderingInfo(rendering_formats)};
     const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
+        .pNext = render_pass ? nullptr : &rendering_ci,
         .flags = flags,
         .stageCount = static_cast<u32>(shader_stages.size()),
         .pStages = shader_stages.data(),
@@ -2383,6 +2452,8 @@ std::string GraphicsPipeline::ShaderLibraryKey(GplPart part, const PipelineState
     GplKeyWriter key_writer;
     key_writer.Add(static_cast<u32>(part));
     // Same render pass handle = same formats and samples (the render pass cache keeps them).
+    // Null with dynamic rendering: the library is made without attachment formats, so one key
+    // (and one library) serves every render target.
     key_writer.Add(render_pass);
     key_writer.Add(static_cast<u32>(LibraryFlags(device)));
     const VkPushConstantRange push_range{DescriptorLayoutBuilder{device}.PushConstantRange()};
@@ -2528,7 +2599,7 @@ GplLibrary GraphicsPipeline::MakeShaderLibrary(GplPart part, const PipelineState
     const bool pre_rasterization = part == GplPart::PreRasterization;
     const VkGraphicsPipelineLibraryCreateInfoEXT library_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
-        .pNext = nullptr,
+        .pNext = render_pass ? nullptr : &SHADER_LIBRARY_RENDERING_CI,
         .flags = static_cast<VkGraphicsPipelineLibraryFlagsEXT>(
             pre_rasterization ? VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT
                               : VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT),
@@ -2709,9 +2780,12 @@ bool GraphicsPipeline::MakeLibraryPipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     }, *pipeline_cache);
+    // Without a render pass the fragment output library carries the attachment formats.
+    const RenderingFormats rendering_formats{MakeRenderingFormats(key.state, device)};
+    const VkPipelineRenderingCreateInfo rendering_ci{RenderingInfo(rendering_formats)};
     const VkGraphicsPipelineLibraryCreateInfoEXT fragment_output_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
-        .pNext = nullptr,
+        .pNext = render_pass ? nullptr : &rendering_ci,
         .flags = VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
     };
     fragment_output_library = device.GetLogical().CreateGraphicsPipeline({

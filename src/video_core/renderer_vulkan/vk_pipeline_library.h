@@ -37,9 +37,11 @@ namespace Vulkan {
 //
 // Libraries are keyed by the SPIR-V the stage was emitted to (a 128-bit hash), the stage's
 // descriptor set layout, the push constant range, the state the part bakes in, the dynamic state
-// list, the render pass and the creation flags. Keying by the emitted SPIR-V is always correct;
-// it is less reuse than possible when the emission depends on the partner stage or on state (see
-// MakeRuntimeInfo), which can be narrowed later in the emission.
+// list, the render pass (none with dynamic rendering, Device::IsGplDynamicRendering: the shader
+// libraries then take no attachment formats and serve every render target) and the creation
+// flags. Keying by the emitted SPIR-V is always correct; it is less reuse than possible when the
+// emission depends on the partner stage or on state (see MakeRuntimeInfo), which can be narrowed
+// later in the emission.
 //
 // Based in part on suyu-main 3157ae0ce0 and f80bbc701a (library cache with build outside the
 // lock, fast link then optimized link, link statistics); unlike there, the shader libraries here

@@ -160,7 +160,9 @@ public:
     /// program's pre-rasterization library (vertex SPIR-V does not depend on the fragment
     /// stage); a fragment-only key builds just the fragment library, emitted as if the partner
     /// writes every varying (the common variant). The key's state (attribute types, render
-    /// target formats, depth and raster state) is what the libraries are keyed and built with.
+    /// target formats, depth and raster state) is what the libraries are keyed and built with;
+    /// with Device::IsGplDynamicRendering the render target formats are not part of it (the
+    /// libraries are made without a render pass), so they match any render target.
     WarmResult WarmGraphicsLibraries(ShaderPools& pools, const GraphicsPipelineCacheKey& key,
                                      std::span<Shader::Environment* const> envs);
 

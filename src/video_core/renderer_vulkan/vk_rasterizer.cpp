@@ -1070,7 +1070,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
             recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
         }
         if (recorded) {
-            scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+            scheduler.RequestRenderpass(texture_cache.GetFramebuffer(),
+                                        device.IsGplDynamicRendering());
         }
     }
     if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
@@ -1727,7 +1728,7 @@ void RasterizerVulkan::CaptureIndirectTrace() {
     });
     slot->tick = scheduler.CurrentTick();
     slot->pending = true;
-    scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
+    scheduler.RequestRenderpass(texture_cache.GetFramebuffer(), device.IsGplDynamicRendering());
     scheduler.NoteRenderPassStores();
 }
 
@@ -1994,7 +1995,7 @@ void RasterizerVulkan::Clear(u32 layer_count) {
                                  !scheduler.IsRenderPassActive() &&
                                  (!use_color || color_full_channels) && ds_deferrable;
     if (!can_defer_clear) {
-        scheduler.RequestRenderpass(framebuffer);
+        scheduler.RequestRenderpass(framebuffer, device.IsGplDynamicRendering());
     }
 
     query_cache.NotifySegment(true);
@@ -3178,7 +3179,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
         }
     }
     if (frame_dump.BeginPass(framebuffer, colors)) {
-        scheduler.RequestRenderpass(framebuffer);
+        scheduler.RequestRenderpass(framebuffer, device.IsGplDynamicRendering());
     }
 }
 
