@@ -294,6 +294,33 @@ public:
         return build->Failed();
     }
 
+    /// Converted instructions over all stages, a predictor of the driver build time.
+    void SetSourceWords(size_t words) noexcept {
+        source_words = words;
+    }
+
+    [[nodiscard]] size_t SourceWords() const noexcept {
+        return source_words;
+    }
+
+    [[nodiscard]] bool UsesTransformFeedback() const noexcept {
+        return key.state.xfb_enabled != 0;
+    }
+
+    [[nodiscard]] u64 KeyHash() const noexcept {
+        return key.Hash();
+    }
+
+    /// Draws skipped while the pipeline was being built (EDEN_NX2_HEAVY_SKIP), and when the
+    /// first one was; read and written on the GPU thread only.
+    u32 heavy_skipped_draws{};
+    /// Why the last unbuilt draw was held instead of skipped (index into the held_draw reasons).
+    u8 hold_reason{};
+    u32 hold_target_width{};  ///< Render target of that draw (color 0, or depth when colorless)
+    u32 hold_target_height{};
+    bool hold_target_color{};
+    std::chrono::steady_clock::time_point heavy_skip_begin{};
+
     /// Fast draw (nx2_fast_draw.h): whether draws can keep the image views and samplers the last
     /// captured Configure resolved. Handles computed at draw time are resolved on every draw.
     [[nodiscard]] bool TakesDeltaDraws() const noexcept {
@@ -382,6 +409,7 @@ private:
     VideoCommon::EvictedPointerSlots::Slots mapped_pointers;
     u64 last_use_frame{};
     bool used{};
+    size_t source_words{};
 
     std::array<vk::ShaderModule, NUM_STAGES> spv_modules;
 

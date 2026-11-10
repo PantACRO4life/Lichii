@@ -43,3 +43,10 @@ EDEN_NX2_FENCE_BATCH=1
 #EDEN_NX2_SPLIT_SKIP=1
 #EDEN_NX2_AUTO_STUB=1
 #EDEN_NX2_KEEP_ASTC=1
+
+# Skip the draws of a native (Switch 2) pipeline of at least this many converted instructions
+# while the driver builds it, instead of holding the whole frame. A draw is still held when its
+# pipeline writes storage or uses transform feedback, or when its render target was not cleared
+# this frame and is not a redrawn scene-size target. 1 picks 4000; any other number is the
+# threshold. Unset or 0: off. Brief pop-in while the pipeline builds.
+#EDEN_NX2_HEAVY_SKIP=1

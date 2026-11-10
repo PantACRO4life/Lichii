@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -16,6 +17,22 @@
 #include "video_core/shader_jobs.h"
 
 namespace Vulkan {
+
+/// EDEN_NX2_HEAVY_SKIP: a native pipeline of at least this many converted instructions (all
+/// stages) has its draws skipped while the driver builds it, instead of holding every draw
+/// behind it. "1" picks 4000; 0 or unset turns it off. In a demanding Switch 2 test title's first
+/// visits every driver build over 500 ms was above 4000, and they made ~90% of the compile time.
+inline size_t HeavySkipWords() {
+    static const size_t words = [] {
+        const char* value = std::getenv("EDEN_NX2_HEAVY_SKIP");
+        if (!value || !*value) {
+            return size_t{0};
+        }
+        const size_t parsed = static_cast<size_t>(std::strtoull(value, nullptr, 10));
+        return parsed == 1 ? size_t{4000} : parsed;
+    }();
+    return words;
+}
 
 /// Bytes of translated IR that pipelines hold until their job emits the SPIR-V. The scheduler
 /// counts a job's bytes only while one of its stages runs, so a pipeline whose IR doesn't fit
