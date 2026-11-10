@@ -19,6 +19,7 @@
 #include "common/fs/path_util.h"
 #include "common/scope_exit.h"
 #include "common/logging.h"
+#include "common/nx2_map_log.h"
 #include "common/nx2_sampler.h"
 #include "common/scm_rev.h"
 #include "common/settings.h"
@@ -597,6 +598,44 @@ json ReadGpuMemory(ToolState& state, const json& params) {
     return result;
 }
 
+/// Nx2BadMesh: the reports of indexed draws that read past their vertex buffer (each with the
+/// mapping history of its range), retranslate results, and mapping events: those touching
+/// `address` (GPU, CPU or device, within `span` bytes) or else the newest ones.
+json BadMeshLog(ToolState&, const json& params) {
+    namespace MapLog = Common::Nx2MapLog;
+    json entries = json::array();
+    for (const std::string& text : MapLog::BadMeshes()) {
+        json entry = json::parse(text, nullptr, false);
+        entries.push_back(entry.is_discarded() ? json(text) : std::move(entry));
+    }
+    const size_t max_events = Param<size_t>(params, "events", 64, 0, 65536);
+    std::vector<MapLog::Event> events;
+    if (params.contains("address")) {
+        const u64 address = AddressParam(params, "address");
+        const u64 span = params.contains("span") ? AddressParam(params, "span") : 0x1000;
+        events = MapLog::Find(address, address, address, (std::max<u64>)(span, 1), max_events);
+    } else {
+        events = MapLog::Recent(max_events);
+    }
+    json event_list = json::array();
+    for (const MapLog::Event& event : events) {
+        event_list.push_back(json::parse(MapLog::ToJson(event)));
+    }
+    const auto [bad_draws, skipped_draws] = MapLog::BadDrawCounts();
+    const MapLog::Totals totals = MapLog::GetTotals();
+    return {
+        {"present", MapLog::Frame()},
+        {"bad_draws", bad_draws},
+        {"skipped_draws", skipped_draws},
+        {"entries", std::move(entries)},
+        {"events_recorded", totals.events},
+        {"tile_events_recorded", totals.tile_events},
+        {"ring_capacity", totals.main_capacity},
+        {"tile_ring_capacity", totals.tile_capacity},
+        {"events", std::move(event_list)},
+    };
+}
+
 /// Holds the steps on player 1 (or the handheld controller when player 1 is not connected) from
 /// the next present on, and returns once they are done. The injector stops by itself after the
 /// last step; leaving this function by any path removes it.
@@ -705,6 +744,7 @@ Handlers MakeHandlers(const std::shared_ptr<ToolState>& state) {
         {"read_memory", handler(ReadMemory)},
         {"search_memory", handler(SearchMemory)},
         {"read_gpu_memory", handler(ReadGpuMemory)},
+        {"bad_mesh_log", handler(BadMeshLog)},
         {"input", waiting(Input)},
         {"input_sequence", waiting(InputSequence)},
     };
