@@ -383,6 +383,29 @@ void ReportTextureMemo() {
                  hits, misses, g_memo_mismatches.load(std::memory_order_relaxed));
     }
 }
+
+/// EDEN_NX2_GPL_OPTIMIZE_THREADS=<n> (default 1): the optimized links of EDEN_NX2_GPL_OPTIMIZE run
+/// on their own pool of n low-priority threads, so they don't slow down the builds that draws
+/// wait for. 0 returns null: they run as Background jobs of the shader job scheduler instead.
+/// The pool stays a Common::ThreadWorker of its own (not shader jobs) so its thread count and
+/// placement are kept apart from the scheduler's workers.
+Common::ThreadWorker* GplOptimizeWorkers() {
+    static const size_t threads = [] {
+        const char* const value = std::getenv("EDEN_NX2_GPL_OPTIMIZE_THREADS");
+        const size_t count =
+            value != nullptr && *value != 0 ? std::strtoul(value, nullptr, 10) : size_t{1};
+        LOG_INFO(Render_Vulkan, "Nx2Perf gpl: optimized links on {}", count == 0
+                                    ? std::string{"the shader job scheduler (Background)"}
+                                    : fmt::format("{} low-priority thread(s)", count));
+        return count;
+    }();
+    if (threads == 0) {
+        return nullptr;
+    }
+    static Common::ThreadWorker workers(threads, "VkGplOptimize", {},
+                                        Common::ThreadPlacement::Background);
+    return &workers;
+}
 } // Anonymous namespace
 
 std::chrono::nanoseconds GraphicsPipeline::TakeHoldTime() noexcept {
@@ -406,6 +429,7 @@ GraphicsPipeline::GraphicsPipeline(
       guest_descriptor_queue{guest_descriptor_queue_},
       descriptor_buffer_ring{descriptor_buffer_ring_}, spv_modules{std::move(stages)},
       library_cache{library_params.library_cache}, spirv_hashes{library_params.spirv_hashes},
+      build_jobs{build_queue.jobs},
       worker_only_build{build_queue.jobs && static_cast<bool>(emit_stages)},
       mesh_emulation{std::move(mesh_emulation_)} {
     if (shader_notify) {
@@ -659,6 +683,31 @@ GraphicsPipeline::GraphicsPipeline(
                     library_cache->RecordFallback();
                     FallBackToMonolithic(render_pass);
                 }
+                if (made && GplOptimizeEnabled() && device.CanFastLinkGraphicsLibraries() &&
+                    build_jobs) {
+                    // Optimized link on its own low-priority pool, swapped in at a later draw
+                    // (ConfigureDraw). Dropped if the pipeline goes away before the link started
+                    // (drop_unstarted, or a cancelled Background job when
+                    // EDEN_NX2_GPL_OPTIMIZE_THREADS=0).
+                    auto link = [this, render_pass] {
+                        optimized_pipeline = LinkLibraries(render_pass, true);
+                        optimized_ready.store(true, std::memory_order_release);
+                    };
+                    if (Common::ThreadWorker* const pool = GplOptimizeWorkers()) {
+                        optimized_build.emplace(pool, std::move(link), true);
+                    } else {
+                        optimized_build.emplace(
+                            PipelineBuildQueue{
+                                .jobs = build_jobs,
+                                .priority = VideoCommon::ShaderJobPriority::Background,
+                            },
+                            std::move(link));
+                    }
+                }
+                // The libraries hold the shaders now (the fallback has used them too).
+                for (vk::ShaderModule& module : spv_modules) {
+                    module.reset();
+                }
             } else {
                 pipeline = MakePipeline(render_pass);
             }
@@ -675,6 +724,9 @@ GraphicsPipeline::GraphicsPipeline(
             ReportPipelineBuildFailure(exception.GetResult());
             throw;
         }
+        // Read by the GPU thread once the build is marked done; `pipeline` itself may be swapped
+        // later on the scheduler thread (optimized link).
+        has_pipeline = static_cast<bool>(pipeline);
         if (pipeline_statistics) {
             pipeline_statistics->Collect(device, *pipeline);
         }
@@ -1164,7 +1216,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             scheduler.RequestOutsideRenderPassOperationContext();
         }
     }
-    if (IsBuilt() && (!pipeline || build->Failed())) {
+    if (IsBuilt() && (!has_pipeline || build->Failed())) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
@@ -1301,7 +1353,7 @@ bool GraphicsPipeline::ConfigureDelta(bool is_indexed) {
             scheduler.RequestOutsideRenderPassOperationContext();
         }
     }
-    if (IsBuilt() && (!pipeline || build->Failed())) {
+    if (IsBuilt() && (!has_pipeline || build->Failed())) {
         return false;
     }
     Profile::Scope scope{Profile::Zone::ConfigureDraw};
@@ -1489,6 +1541,18 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
     if (writes_storage) {
         scheduler.NoteRenderPassStores();
+    }
+    // Only once the first build is done: until then its thread may still read `pipeline`.
+    if (IsBuilt() && optimized_ready.load(std::memory_order_acquire) && !optimized_bound) {
+        // The optimized pipeline is in. Swap on the scheduler thread, in order with the draws
+        // recorded so far, and bind again; the first one stays alive for the command buffers
+        // that bound it.
+        optimized_bound = true;
+        scheduler.ForgetGraphicsPipeline(this);
+        scheduler.Record([this](vk::CommandBuffer) {
+            retired_pipeline = std::move(pipeline);
+            pipeline = std::move(optimized_pipeline);
+        });
     }
     if (!IsBuilt()) {
         // Wait for the pipeline to be built
@@ -2223,11 +2287,11 @@ bool InPart(GplPart part, size_t stage) {
                                              : !IsPreRasterizationStage(stage);
 }
 
-/// Create flags of a shader library, keeping link time optimization info when fast links are not
-/// usable on `device`.
+/// Create flags of a shader library, keeping link time optimization info when optimized links are
+/// on or fast links are not usable on `device`.
 VkPipelineCreateFlags LibraryFlags(const Device& device) {
     VkPipelineCreateFlags flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR;
-    if (!device.CanFastLinkGraphicsLibraries()) {
+    if (GplOptimizeEnabled() || !device.CanFastLinkGraphicsLibraries()) {
         flags |= VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
     }
     return flags;
