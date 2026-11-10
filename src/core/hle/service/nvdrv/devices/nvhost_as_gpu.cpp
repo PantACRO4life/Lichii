@@ -17,6 +17,7 @@
 #include "common/bit_util.h"
 #include "common/common_types.h"
 #include "common/logging.h"
+#include "common/nx2_map_log.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
 #include "core/hle/service/nvdrv/core/container.h"
@@ -213,17 +214,21 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
     // reuse its SMMU mapping.
     Nx2DeviceRange range{};
     bool fresh = false; ///< Mapped to the current pages just now
+    u8 source = Common::Nx2MapLog::DeviceReused;
     if (const auto it = nx2_device_ranges.find({cpu_address, size}); it != nx2_device_ranges.end()) {
         range = it->second;
     } else if (session->has_preallocated_area && session->mapper->IsInBounds(cpu_address, size)) {
         range = {session->mapper->Map(cpu_address, size), true};
+        source = Common::Nx2MapLog::DeviceHeap;
     } else {
+        bool allocated = false;
         const auto allocate = [&]() -> u64 {
             auto& smmu = system.Host1x().MemoryManager();
             const DAddr address = smmu.Allocate(Common::AlignUp(size, 0x20000));
             if (address != 0) {
                 smmu.Map(address, cpu_address, size, session->asid, true);
                 fresh = true;
+                allocated = true;
             }
             return address;
         };
@@ -231,10 +236,14 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
         static const bool private_ranges = std::getenv("EDEN_NX2_PRIVATE_DEVICE_RANGES") != nullptr;
         if (private_ranges) {
             range = {allocate(), false};
+            source = Common::Nx2MapLog::DevicePrivate;
         } else {
             range = {Nx2GpuMemoryRegistry::Get().AcquireDeviceRange(session->asid.id, cpu_address,
                                                                     size, allocate),
                      false, true, session->asid.id};
+            // A reference to a range another address space mapped earlier: its SMMU pages were
+            // filled from the CPU range back then, not now.
+            source = allocated ? Common::Nx2MapLog::DeviceNew : Common::Nx2MapLog::DeviceShared;
         }
         if (range.address == 0) {
             LOG_CRITICAL(Service_NVDRV, "Switch 2 GPU memory {:#x}+{:#x}: out of SMMU space",
@@ -245,6 +254,8 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
     const DAddr device_address = range.address;
     nx2_device_ranges[{cpu_address, size}] = range;
     Nx2GpuMemoryRegistry::Get().RecordDeviceRange(cpu_address, size, device_address);
+    Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::DeviceRange, gpu_address, cpu_address,
+                              device_address, size, 0, source);
     // On the GPU thread, like unmaps: a GMMU map takes the texture cache lock, and the callers hold
     // nx2:gpu locks that the GPU thread takes under that lock (sparse blocks backed on write).
     // A reused range is checked there too, before the GMMU map, against the pages the CPU range
@@ -258,6 +269,8 @@ void nvhost_as_gpu::Nx2Map(u64 gpu_address, u64 cpu_address, u64 size) {
                 Nx2RefreshBacking(smmu, *memory, asid, device_address, cpu_address, size);
             }
             gmmu->Map(gpu_address, device_address, size, Tegra::PTEKind::PITCH, false);
+            Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::GmmuMap, gpu_address, 0,
+                                      device_address, size);
         });
     LOG_DEBUG(Service_NVDRV, "Switch 2 GPU mapping {:#x}+{:#x} -> CPU {:#x}", gpu_address, size,
               cpu_address);
@@ -269,7 +282,10 @@ void nvhost_as_gpu::Nx2Unmap(u64 gpu_address, u64 size) {
         return;
     }
     // The GPU thread may still be running command lists that use the range.
-    system.GPU().RunInOrder([gmmu = gmmu.get(), gpu_address, size] { gmmu->Unmap(gpu_address, size); });
+    system.GPU().RunInOrder([gmmu = gmmu.get(), gpu_address, size] {
+        gmmu->Unmap(gpu_address, size);
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::GmmuUnmap, gpu_address, 0, 0, size);
+    });
     LOG_DEBUG(Service_NVDRV, "Switch 2 GPU unmapping {:#x}+{:#x}", gpu_address, size);
 }
 
@@ -290,6 +306,8 @@ void nvhost_as_gpu::Nx2Release(u64 cpu_address, u64 size) {
     auto& smmu = system.Host1x().MemoryManager();
     // Queued after the GPU unmaps of the range, so the GPU thread is done with it.
     system.GPU().RunInOrder([&smmu, mapper, range, cpu_address, size] {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::SmmuRelease, 0, cpu_address,
+                                  range.address, size, 0, static_cast<u8>(range.heap));
         if (range.heap) {
             if (mapper != nullptr) {
                 mapper->Unmap(cpu_address, size);

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "common/logging.h"
+#include "common/nx2_map_log.h"
 #include "core/hle/service/nvdrv/devices/nvdevice.h"
 
 namespace Service::Nvidia::Devices {
@@ -63,6 +64,8 @@ public:
     }
 
     void MapAt(u32 handle, u64 offset, u64 gpu_address, u64 cpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::RegMap, gpu_address, cpu_address,
+                                  offset, size, handle);
         std::scoped_lock lk{mutex};
         TrimMappings(gpu_address, size);
         mappings.push_back({gpu_address, cpu_address, size, handle, offset});
@@ -73,6 +76,7 @@ public:
 
     // NormalUnmapGpuMemory4K, or destroying the memory: the GPU range stops reaching it.
     void Unmap(u64 gpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::RegUnmap, gpu_address, 0, 0, size);
         std::scoped_lock lk{mutex};
         TrimMappings(gpu_address, size);
         for (auto& [owner, listener] : listeners) {
@@ -116,6 +120,7 @@ public:
     // Backing memory [cpu_address, +size) is about to be freed (its GPU mappings are gone): each
     // address space drops its SMMU mapping of it, in GPU-thread order.
     void ReleaseBacking(u64 cpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::RegRelease, 0, cpu_address, 0, size);
         {
             std::scoped_lock lk{device_mutex};
             device_ranges.erase(cpu_address);
@@ -133,6 +138,7 @@ public:
     // The GPU mapping never changes, so the texture cache doesn't rebuild the images over it as
     // blocks get memory; unbacked blocks read zero.
     void CreateSparse(u64 gpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::SparseCreate, gpu_address, 0, 0, size);
         std::scoped_lock lk{mutex};
         sparse_regions[gpu_address] = size;
         for (auto& [owner, listener] : listeners) {
@@ -143,6 +149,7 @@ public:
     }
 
     void DestroySparse(u64 gpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::SparseDestroy, gpu_address, 0, 0, size);
         std::scoped_lock lk{mutex};
         sparse_regions.erase(gpu_address);
         for (auto& [owner, listener] : listeners) {
@@ -153,6 +160,8 @@ public:
     }
 
     void BackSparse(u64 gpu_address, u64 cpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::SparseBack, gpu_address, cpu_address, 0,
+                                  size);
         std::scoped_lock lk{mutex};
         for (auto& [owner, listener] : listeners) {
             if (listener.back) {
@@ -166,6 +175,8 @@ public:
     // cpu_address 0 it is unmapped and reads zero. The GPU mapping stays as it is; only the
     // region's device pages change, in GPU-thread order.
     void MapSparseTile(u64 gpu_address, u64 cpu_address, u64 size) {
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::SparseTile, gpu_address, cpu_address, 0,
+                                  size);
         std::scoped_lock lk{mutex};
         for (auto& [owner, listener] : listeners) {
             if (listener.tile) {
@@ -292,6 +303,39 @@ public:
             }
         }
         return cpu_address ? DeviceAddressOf(*cpu_address) : std::nullopt;
+    }
+
+    /// The recorded mapping that holds gpu_address (diagnostics, Nx2BadMesh).
+    struct MappingInfo {
+        u64 gpu_address;
+        u64 cpu_address;
+        u64 size;
+        u32 handle;
+        u64 offset;
+    };
+    std::optional<MappingInfo> FindMapping(u64 gpu_address) {
+        std::scoped_lock lk{mutex};
+        for (auto it = mappings.rbegin(); it != mappings.rend(); ++it) {
+            if (gpu_address >= it->gpu_address && gpu_address - it->gpu_address < it->size) {
+                return MappingInfo{it->gpu_address, it->cpu_address, it->size, it->handle,
+                                   it->offset};
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// Whether [gpu_address, +size) lies in a sparse or GPU-only region (diagnostics).
+    std::optional<std::pair<u64, u64>> FindSparseRegion(u64 gpu_address) {
+        std::scoped_lock lk{mutex};
+        auto it = sparse_regions.upper_bound(gpu_address);
+        if (it == sparse_regions.begin()) {
+            return std::nullopt;
+        }
+        --it;
+        if (gpu_address - it->first >= it->second) {
+            return std::nullopt;
+        }
+        return *it;
     }
 
 private:

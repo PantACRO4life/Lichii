@@ -49,6 +49,8 @@ add_library(
     dkb_cpu_trace.h
     nx2_sampler.cpp
     nx2_sampler.h
+    nx2_map_log.cpp
+    nx2_map_log.h
     dynamic_library.cpp
     dynamic_library.h
     elf.h
