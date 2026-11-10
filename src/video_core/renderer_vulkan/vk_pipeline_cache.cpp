@@ -2044,6 +2044,11 @@ void PipelineCache::TickFrame() {
     constexpr u64 EvictCheckFrames = 600;
     if (frame_count % EvictCheckFrames == 0) {
         EvictUnusedPipelines();
+        if (device.IsExtGraphicsPipelineLibrarySupported()) {
+            // The libraries of pipelines destroyed since the last check (an evicted pipeline
+            // goes once the GPU is done with it, above).
+            graphics_libraries.PruneUnused();
+        }
     }
 }
 
