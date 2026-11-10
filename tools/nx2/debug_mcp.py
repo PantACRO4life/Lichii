@@ -97,7 +97,12 @@ TOOLS = [
                        "manifest.jsonl. 'sampled' also reads back every sampled texture with its "
                        "sampler state; 'buffers' records every draw's and dispatch's uniform and "
                        "storage buffers (kind: buffer, buffer_<hash>.bin.zst) and dispatch group "
-                       "counts (kind: launch). Returns "
+                       "counts (kind: launch). With 'buffers', 'vertex_buffers' (default true) "
+                       "also records each draw's vertex bindings, vertex attribute layout, index "
+                       "buffer and draw parameters (kind: geometry) and dumps the vertex and index "
+                       "ranges it reads (kind: buffer, type vertex or index). "
+                       "EDEN_NX2_DUMP_HOST_COPY=1 adds the host copy the GPU read next to the "
+                       "guest bytes (source: host_copy). Returns "
                        "the directory, summary, entry counts and the first manifest entries. "
                        "'index' builds index.html with frame_dump_index.py.",
         "inputSchema": {
@@ -105,6 +110,7 @@ TOOLS = [
             "properties": {
                 "sampled": {"type": "boolean"},
                 "buffers": {"type": "boolean"},
+                "vertex_buffers": {"type": "boolean"},
                 "timeout_s": {"type": "integer", "minimum": 1, "maximum": 600},
                 "manifest_lines": {"type": "integer", "minimum": 0, "maximum": 5000},
                 "index": {"type": "boolean"},
