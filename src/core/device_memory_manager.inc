@@ -350,6 +350,67 @@ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
 }
 
 template <typename Traits>
+typename DeviceMemoryManager<Traits>::BackingCheck DeviceMemoryManager<Traits>::CheckBacking(
+    DAddr address) {
+    BackingCheck check{};
+    const size_t page = address >> Memory::YUZU_PAGEBITS;
+    if (address >= device_as_size) {
+        return check;
+    }
+    std::scoped_lock lk(mapping_guard);
+    const u32 compressed = tracked_entries[page].compressed_physical_ptr;
+    const auto [asid, vaddr] = ExtractCPUBacking(page);
+    check.mapped = compressed != 0;
+    check.asid = asid.id;
+    if (check.mapped) {
+        check.device_physical = PAddr(compressed - 1) << Memory::YUZU_PAGEBITS;
+    }
+    if (vaddr == 0) {
+        return check;
+    }
+    const VAddr page_vaddr = vaddr & ~static_cast<VAddr>(Memory::YUZU_PAGEMASK);
+    check.cpu_address = page_vaddr + (address & Memory::YUZU_PAGEMASK);
+    if (asid.id < registered_processes.size() && registered_processes[asid.id] != nullptr) {
+        const u8* const ptr =
+            registered_processes[asid.id]->GetPointerSilent(Common::ProcessAddress(page_vaddr));
+        if (ptr != nullptr && IsPhysicalPointer(ptr)) {
+            check.cpu_mapped = true;
+            check.cpu_physical = GetRawPhysicalAddr(ptr) & ~static_cast<PAddr>(page_mask);
+        }
+    }
+    return check;
+}
+
+template <typename Traits>
+size_t DeviceMemoryManager<Traits>::RefreshStaleBacking(DAddr address, size_t size) {
+    size_t changed = 0;
+    const DAddr first = address & ~static_cast<DAddr>(Memory::YUZU_PAGEMASK);
+    for (DAddr page = first; page < address + size; page += Memory::YUZU_PAGESIZE) {
+        const BackingCheck check = CheckBacking(page);
+        if (!check.cpu_mapped || check.cpu_address == 0 ||
+            (check.mapped && check.device_physical == check.cpu_physical)) {
+            continue;
+        }
+        // Unmap first: it drops the reverse (physical to device) entry of the old memory and
+        // invalidates the caches over the page.
+        Unmap(page, Memory::YUZU_PAGESIZE);
+        Map(page, check.cpu_address, Memory::YUZU_PAGESIZE, Asid{check.asid}, true);
+        ++changed;
+    }
+    return changed;
+}
+
+template <typename Traits>
+bool DeviceMemoryManager<Traits>::ReadProcessMemory(size_t asid, VAddr address, void* dest,
+                                                    size_t size) {
+    if (asid >= registered_processes.size() || registered_processes[asid] == nullptr) {
+        return false;
+    }
+    return registered_processes[asid]->ReadBlockUnsafe(Common::ProcessAddress(address), dest,
+                                                       size);
+}
+
+template <typename Traits>
 void DeviceMemoryManager<Traits>::CutContinuityAt(size_t page) {
     // Runs counted from the pages before `page` end there: the pages from `page` on are being
     // mapped again or unmapped. A run is counted down page by page (TrackContinuityImpl), so the
