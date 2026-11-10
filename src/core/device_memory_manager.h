@@ -148,6 +148,28 @@ public:
     /// Traps the next guest CPU read of these pages, to learn which GPU writes the CPU reads.
     void ArmReadTraps(DAddr addr, size_t size);
 
+    /// Diagnostics (Nx2BadMesh): the memory a device page reads, next to the memory its CPU
+    /// address has now. Map takes the CPU page's physical memory once; if the CPU address gets
+    /// other memory later (freed and allocated again), the device page keeps reading the old one.
+    struct BackingCheck {
+        bool mapped;          ///< the device page reads memory
+        bool cpu_mapped;      ///< the CPU address it was mapped from has memory now
+        size_t asid;
+        VAddr cpu_address;    ///< the CPU address of `address` (0: none recorded)
+        PAddr device_physical; ///< physical page the device page reads
+        PAddr cpu_physical;   ///< physical page behind cpu_address now
+    };
+    [[nodiscard]] BackingCheck CheckBacking(DAddr address);
+
+    /// Maps the device pages of [address, +size) again from their CPU addresses where those now
+    /// have other memory than the device pages read (see CheckBacking). Invalidates the caches
+    /// over each changed page. Returns the number of pages changed.
+    size_t RefreshStaleBacking(DAddr address, size_t size);
+
+    /// Reads a registered process's memory at a CPU address, without cache flushes. False when
+    /// the process or the range is not mapped.
+    bool ReadProcessMemory(size_t asid, VAddr address, void* dest, size_t size);
+
 private:
     struct TranslationEntry {
         DAddr guest_page{};
