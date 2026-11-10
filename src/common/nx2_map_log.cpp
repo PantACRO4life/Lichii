@@ -63,7 +63,8 @@ bool Overlaps(u64 start, u64 size, u64 address, u64 span) {
 
 /// Whether the event's `device` field is a device address (else an offset or a result).
 bool HasDevice(Kind kind) {
-    return kind == Kind::DeviceRange || kind == Kind::GmmuMap || kind == Kind::SmmuRelease;
+    return kind == Kind::DeviceRange || kind == Kind::GmmuMap || kind == Kind::SmmuRelease ||
+           kind == Kind::StaleRange;
 }
 
 bool Touches(const Event& event, u64 gpu, u64 cpu, u64 device, u64 span) {
@@ -98,6 +99,7 @@ const char* KindName(Kind kind) {
         "mem_create",   "mem_destroy", "reg_map",     "reg_unmap",    "reg_release",
         "sparse_create", "sparse_destroy", "sparse_back", "sparse_tile", "device_range",
         "gmmu_map",     "gmmu_unmap",  "smmu_release", "gpu_attribute", "memory_svc",
+        "stale_range",
     };
     const auto index = static_cast<size_t>(kind);
     return index < names.size() ? names[index] : "unknown";

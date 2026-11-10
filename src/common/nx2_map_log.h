@@ -34,6 +34,8 @@ enum class Kind : u8 {
                    ///< device = result
     MemorySvc,     ///< heap/physical memory SVC: flags = svc id, gpu/cpu = its two addresses,
                    ///< device = its result
+    StaleRange,    ///< a reused device range read old pages (nvhost_as_gpu Nx2RefreshBacking):
+                   ///< handle = stale pages, flags = 1 when mapped again
     Count,
 };
 
