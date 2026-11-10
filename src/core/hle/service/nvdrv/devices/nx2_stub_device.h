@@ -318,17 +318,17 @@ public:
         if (gpu_address - it->first >= it->second) {
             return std::nullopt;
         }
-        return *it;
+        return std::pair<u64, u64>{it->first, it->second};
     }
 
 private:
-    /// Up to ~10 ms of tries.
+    /// Up to ~10 ms of tries (more with a coarse system timer).
     static bool TryLockBriefly(std::unique_lock<std::mutex>& lock) {
-        for (int attempt = 0; attempt < 100; ++attempt) {
+        for (int attempt = 0; attempt < 20; ++attempt) {
             if (lock.try_lock()) {
                 return true;
             }
-            std::this_thread::sleep_for(std::chrono::microseconds{100});
+            std::this_thread::sleep_for(std::chrono::microseconds{500});
         }
         return false;
     }

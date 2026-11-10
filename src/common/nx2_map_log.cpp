@@ -31,7 +31,7 @@ struct Ring {
 
 struct State {
     std::mutex mutex;
-    Ring main{MAIN_CAPACITY};
+    Ring primary{MAIN_CAPACITY};
     Ring tile{TILE_CAPACITY};
     u64 seq{};
     std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
@@ -61,15 +61,20 @@ bool Overlaps(u64 start, u64 size, u64 address, u64 span) {
     return start < address + span && address < start + length;
 }
 
+/// Whether the event's `device` field is a device address (else an offset or a result).
+bool HasDevice(Kind kind) {
+    return kind == Kind::DeviceRange || kind == Kind::GmmuMap || kind == Kind::SmmuRelease;
+}
+
 bool Touches(const Event& event, u64 gpu, u64 cpu, u64 device, u64 span) {
     if (event.kind == Kind::MemorySvc) {
-        // gpu/cpu/device hold the SVC's first three arguments: compare them as CPU addresses.
+        // gpu and cpu hold the SVC's two addresses: compare them as CPU addresses.
         return Overlaps(event.gpu, event.size, cpu, span) ||
                Overlaps(event.cpu, event.size, cpu, span);
     }
     return Overlaps(event.gpu, event.size, gpu, span) ||
            Overlaps(event.cpu, event.size, cpu, span) ||
-           Overlaps(event.device, event.size, device, span);
+           (HasDevice(event.kind) && Overlaps(event.device, event.size, device, span));
 }
 
 void Collect(const Ring& ring, std::vector<Event>& out, u64 gpu, u64 cpu, u64 device, u64 span,
@@ -113,7 +118,7 @@ void Record(Kind kind, u64 gpu, u64 cpu, u64 device, u64 size, u32 handle, u8 fl
                                              .count());
     const u64 frame = Frame();
     std::scoped_lock lock{state.mutex};
-    Ring& ring = IsTileKind(kind) ? state.tile : state.main;
+    Ring& ring = IsTileKind(kind) ? state.tile : state.primary;
     ring.events[ring.count % ring.events.size()] = Event{
         .seq = ++state.seq,
         .time_us = time_us,
@@ -134,7 +139,7 @@ std::vector<Event> Find(u64 gpu, u64 cpu, u64 device, u64 span, size_t max) {
     std::vector<Event> out;
     {
         std::scoped_lock lock{state.mutex};
-        Collect(state.main, out, gpu, cpu, device, span, max);
+        Collect(state.primary, out, gpu, cpu, device, span, max);
         Collect(state.tile, out, gpu, cpu, device, span, max);
     }
     std::ranges::sort(out, {}, &Event::seq);
@@ -148,7 +153,7 @@ std::vector<Event> Recent(size_t max) {
     State& state = GetState();
     std::vector<Event> out;
     std::scoped_lock lock{state.mutex};
-    const Ring& ring = state.main;
+    const Ring& ring = state.primary;
     const u64 kept = (std::min<u64>)({ring.count, u64{ring.events.size()}, u64{max}});
     out.reserve(kept);
     for (u64 i = kept; i > 0; --i) {
@@ -160,7 +165,7 @@ std::vector<Event> Recent(size_t max) {
 Totals GetTotals() {
     State& state = GetState();
     std::scoped_lock lock{state.mutex};
-    return {state.main.count, state.tile.count, state.main.events.size(),
+    return {state.primary.count, state.tile.count, state.primary.events.size(),
             state.tile.events.size()};
 }
 
@@ -171,10 +176,16 @@ std::string ToJson(const Event& event) {
             event.seq, event.time_us / 1000.0, event.frame, KindName(event.kind), event.flags,
             event.gpu, event.cpu, event.device, event.size);
     }
+    // The third address is a device address, the offset in the memory handle (reg_map) or a
+    // result (gpu_attribute).
+    const char* const third = HasDevice(event.kind)              ? "device"
+                              : event.kind == Kind::RegMap       ? "offset"
+                              : event.kind == Kind::GpuAttribute ? "result"
+                                                                 : "unused";
     return fmt::format(
-        R"({{"seq":{},"time_ms":{:.3f},"frame":{},"kind":"{}","gpu":"{:#x}","cpu":"{:#x}","device":"{:#x}","size":"{:#x}","handle":{},"flags":{}}})",
+        R"({{"seq":{},"time_ms":{:.3f},"frame":{},"kind":"{}","gpu":"{:#x}","cpu":"{:#x}","{}":"{:#x}","size":"{:#x}","handle":{},"flags":{}}})",
         event.seq, event.time_us / 1000.0, event.frame, KindName(event.kind), event.gpu,
-        event.cpu, event.device, event.size, event.handle, event.flags);
+        event.cpu, third, event.device, event.size, event.handle, event.flags);
 }
 
 void AddBadMesh(std::string json) {
