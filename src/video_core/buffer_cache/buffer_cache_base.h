@@ -527,6 +527,18 @@ public:
         }
     }
 
+    /// The cached host buffer holding a device range and the range's offset in it, if one does,
+    /// for diagnostics. Nothing is created or synchronized.
+    [[nodiscard]] std::pair<const Buffer*, u32> FindCachedRange(DAddr device_addr, u32 size) {
+        if (const BufferId id = page_table[device_addr >> CACHING_PAGEBITS]) {
+            const Buffer& buffer = slot_buffers[id];
+            if (buffer.IsInBounds(device_addr, size)) {
+                return {&buffer, buffer.Offset(device_addr)};
+            }
+        }
+        return {nullptr, 0};
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 

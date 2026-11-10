@@ -259,6 +259,10 @@ private:
 #endif
     /// Records the uniform and storage buffers of the current draw or dispatch for the frame dump.
     bool FrameDumpBuffers(bool compute, std::span<const u64> shader_hashes);
+    /// Records the vertex input, index buffer and draw parameters of the current draw, and the
+    /// vertex and index data it reads, for the frame dump.
+    bool FrameDumpGeometry(bool is_indexed, bool is_indirect, bool dynamic_vertex_input,
+                           std::span<const u64> shader_hashes);
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;

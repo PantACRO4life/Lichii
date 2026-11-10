@@ -240,6 +240,114 @@ DrawParams MakeDrawParams(const Tegra::Engines::Maxwell3D::DrawManager::State& d
     return params;
 }
 
+/// Frame dump: the guest vertex attribute format as "<components>_<type>" and its size in bytes,
+/// without the asserts of the register helpers for values they do not know.
+std::pair<std::string, u32> VertexFormat(Maxwell::VertexAttribute attribute) {
+    using AttribSize = Maxwell::VertexAttribute::Size;
+    using AttribType = Maxwell::VertexAttribute::Type;
+    std::string_view components = "unknown";
+    u32 bytes = 0;
+    switch (attribute.size.Value()) {
+    case AttribSize::Size_R32_G32_B32_A32:
+        components = "32_32_32_32";
+        bytes = 16;
+        break;
+    case AttribSize::Size_R32_G32_B32:
+        components = "32_32_32";
+        bytes = 12;
+        break;
+    case AttribSize::Size_R16_G16_B16_A16:
+        components = "16_16_16_16";
+        bytes = 8;
+        break;
+    case AttribSize::Size_R32_G32:
+        components = "32_32";
+        bytes = 8;
+        break;
+    case AttribSize::Size_R16_G16_B16:
+        components = "16_16_16";
+        bytes = 6;
+        break;
+    case AttribSize::Size_R8_G8_B8_A8:
+        components = "8_8_8_8";
+        bytes = 4;
+        break;
+    case AttribSize::Size_X8_B8_G8_R8:
+        components = "X8_B8_G8_R8";
+        bytes = 4;
+        break;
+    case AttribSize::Size_R16_G16:
+        components = "16_16";
+        bytes = 4;
+        break;
+    case AttribSize::Size_R32:
+        components = "32";
+        bytes = 4;
+        break;
+    case AttribSize::Size_R8_G8_B8:
+        components = "8_8_8";
+        bytes = 3;
+        break;
+    case AttribSize::Size_R8_G8:
+        components = "8_8";
+        bytes = 2;
+        break;
+    case AttribSize::Size_G8_R8:
+        components = "G8_R8";
+        bytes = 2;
+        break;
+    case AttribSize::Size_R16:
+        components = "16";
+        bytes = 2;
+        break;
+    case AttribSize::Size_R8:
+        components = "8";
+        bytes = 1;
+        break;
+    case AttribSize::Size_A8:
+        components = "A8";
+        bytes = 1;
+        break;
+    case AttribSize::Size_A2_B10_G10_R10:
+        components = "A2_B10_G10_R10";
+        bytes = 4;
+        break;
+    case AttribSize::Size_B10_G11_R11:
+        components = "B10_G11_R11";
+        bytes = 4;
+        break;
+    default:
+        break;
+    }
+    std::string_view type = "unknown";
+    switch (attribute.type.Value()) {
+    case AttribType::SNorm:
+        type = "snorm";
+        break;
+    case AttribType::UNorm:
+        type = "unorm";
+        break;
+    case AttribType::SInt:
+        type = "sint";
+        break;
+    case AttribType::UInt:
+        type = "uint";
+        break;
+    case AttribType::UScaled:
+        type = "uscaled";
+        break;
+    case AttribType::SScaled:
+        type = "sscaled";
+        break;
+    case AttribType::Float:
+        type = "float";
+        break;
+    default:
+        break;
+    }
+    return {fmt::format("{}_{}", components, type), bytes};
+}
+
 bool SupportsPrimitiveRestart(VkPrimitiveTopology topology) {
     switch (topology) {
     case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
@@ -1068,6 +1176,11 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
         if (frame_dump.CapturingBuffers()) {
             recorded |= FrameDumpBuffers(false, pipeline->ShaderHashes());
+        }
+        if (frame_dump.CapturingVertexBuffers() && !mesh_draw) {
+            recorded |= FrameDumpGeometry(is_indexed, is_indirect,
+                                          pipeline->HasDynamicVertexInput(),
+                                          pipeline->ShaderHashes());
         }
         if (recorded) {
             scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
@@ -3166,34 +3279,206 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
             device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
         }
     });
-    if (!compute) {
-        // Vertex buffers, as stage 0 with type "vertex" (index = vertex stream).
-        buffer_cache.ForEachBoundVertexBuffer([&](u32 index, const auto& binding, u32 bound_size,
-                                                  const auto* host, u32 host_offset) {
-            const u32 size = std::min(bound_size, BUFFER_CAP);
-            const bool gpu_modified = buffer_cache.IsRegionGpuModified(binding.device_addr, size);
-            FrameDump::BoundBuffer& buffer = buffers.emplace_back(FrameDump::BoundBuffer{
+    return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
+}
+
+bool RasterizerVulkan::FrameDumpGeometry(bool is_indexed, bool is_indirect,
+                                         bool dynamic_vertex_input,
+                                         std::span<const u64> shader_hashes) {
+    static constexpr u32 BUFFER_CAP = 4U << 20;
+    const auto& regs = maxwell3d->regs;
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    std::vector<FrameDump::BoundBuffer> buffers;
+    // A dumped range, as stage 0 with type "vertex" (index = binding) or "index". Guest bytes,
+    // or the host buffer when the GPU wrote the range.
+    const auto add_buffer = [&](u32 index, bool indices, GPUVAddr gpu_addr, DAddr device_addr,
+                                u32 bound_size, u32 size, VkBuffer host, u32 host_offset) {
+        const bool gpu_modified = buffer_cache.IsRegionGpuModified(device_addr, size);
+        FrameDump::BoundBuffer& buffer = buffers.emplace_back(FrameDump::BoundBuffer{
+            .stage = 0,
+            .storage = false,
+            .index = index,
+            .vertex = !indices,
+            .indices = indices,
+            .written = false,
+            .gpu_addr = gpu_addr,
+            .device_addr = device_addr,
+            .bound_size = bound_size,
+            .size = size,
+            .gpu_modified = gpu_modified,
+            .host = host,
+            .host_offset = host_offset,
+            .guest = {},
+        });
+        if (!gpu_modified || host == VK_NULL_HANDLE) {
+            buffer.guest.resize(size);
+            device_memory.ReadBlockUnsafe(device_addr, buffer.guest.data(), size);
+        }
+    };
+
+    // The vertices the draw reads, from the guest index data when indexed. Unknown for indirect
+    // draws, whose counts live in GPU memory.
+    const s32 base_vertex = static_cast<s32>(draw_state.base_index);
+    std::optional<std::pair<s64, s64>> vertex_range;
+    std::string index_json = "null";
+    if (is_indexed) {
+        const auto& index = draw_state.index_buffer;
+        const u32 format_bytes = static_cast<u32>(index.FormatSizeInBytes());
+        const bool inline_indices = !draw_state.inline_index_draw_indexes.empty();
+        const u64 begin = u64{index.first} * format_bytes;
+        u64 bytes = u64{index.count} * format_bytes;
+        GPUVAddr gpu_addr = 0;
+        std::optional<DAddr> device_addr;
+        std::vector<u8> guest;
+        if (inline_indices) {
+            const auto& data = draw_state.inline_index_draw_indexes;
+            bytes = begin < data.size() ? (std::min<u64>)(bytes, data.size() - begin) : 0;
+            guest.assign(data.data() + begin, data.data() + begin + bytes);
+        } else {
+            gpu_addr = index.StartAddress() + begin;
+            device_addr = gpu_memory->GpuToCpuAddress(gpu_addr);
+            bytes = device_addr ? (std::min<u64>)(bytes, BUFFER_CAP) : 0;
+            guest.resize(bytes);
+            if (bytes != 0) {
+                device_memory.ReadBlockUnsafe(*device_addr, guest.data(), bytes);
+            }
+        }
+        const bool restart = regs.primitive_restart.enabled != 0;
+        u32 min_index = (std::numeric_limits<u32>::max)();
+        u32 max_index = 0;
+        for (size_t offset = 0; offset + format_bytes <= guest.size(); offset += format_bytes) {
+            u32 value = 0;
+            std::memcpy(&value, guest.data() + offset, format_bytes);
+            if (restart && value == regs.primitive_restart.index) {
+                continue;
+            }
+            min_index = (std::min)(min_index, value);
+            max_index = (std::max)(max_index, value);
+        }
+        const bool any = min_index <= max_index;
+        if (any && !is_indirect) {
+            vertex_range = std::pair{s64{min_index} + base_vertex, s64{max_index} + base_vertex};
+        }
+        index_json = fmt::format(
+            R"({{"gpu_addr":"{:#x}","device_addr":"{:#x}","limit":"{:#x}","format":"u{}","first":{},"count":{},"base_vertex":{},"inline":{},"bytes":{},"min_index":{},"max_index":{},"restart":{},"restart_index":{}}})",
+            gpu_addr, device_addr.value_or(0), inline_indices ? 0 : index.EndAddress(),
+            format_bytes * 8, index.first, index.count, base_vertex, inline_indices, bytes,
+            any ? s64{min_index} : -1, any ? s64{max_index} : -1, restart,
+            regs.primitive_restart.index);
+        if (inline_indices && bytes != 0) {
+            buffers.push_back(FrameDump::BoundBuffer{
                 .stage = 0,
                 .storage = false,
-                .index = index,
-                .vertex = true,
+                .index = 0,
+                .indices = true,
                 .written = false,
                 .gpu_addr = 0,
-                .device_addr = binding.device_addr,
-                .bound_size = bound_size,
-                .size = size,
-                .gpu_modified = gpu_modified,
-                .host = host ? host->Handle() : VK_NULL_HANDLE,
-                .host_offset = host_offset,
-                .guest = {},
+                .device_addr = 0,
+                .bound_size = static_cast<u32>(bytes),
+                .size = static_cast<u32>(bytes),
+                .gpu_modified = false,
+                .host = VK_NULL_HANDLE,
+                .host_offset = 0,
+                .guest = std::move(guest),
             });
-            if (!gpu_modified || !host) {
-                buffer.guest.resize(size);
-                device_memory.ReadBlockUnsafe(binding.device_addr, buffer.guest.data(), size);
-            }
-        });
+        } else if (bytes != 0) {
+            const auto [host, host_offset] =
+                buffer_cache.FindCachedRange(*device_addr, static_cast<u32>(bytes));
+            add_buffer(0, true, gpu_addr, *device_addr, static_cast<u32>(bytes),
+                       static_cast<u32>(bytes), host ? host->Handle() : VK_NULL_HANDLE,
+                       host_offset);
+        }
+    } else if (!is_indirect && draw_state.vertex_buffer.count != 0) {
+        const s64 first = draw_state.vertex_buffer.first;
+        vertex_range = std::pair{first, first + draw_state.vertex_buffer.count - 1};
     }
-    return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
+    const u32 instances = (std::max)(draw_state.instance_count, 1U);
+
+    // Attributes read from a buffer, with the end of the furthest one in each binding.
+    std::array<u32, Maxwell::NumVertexArrays> attribute_end{};
+    u32 used_bindings = 0;
+    std::string attributes;
+    std::string constants;
+    for (u32 location = 0; location < Maxwell::NumVertexAttributes; ++location) {
+        const Maxwell::VertexAttribute attribute{regs.vertex_attrib_format[location]};
+        if (attribute.constant) {
+            constants += fmt::format("{}{}", constants.empty() ? "" : ",", location);
+            continue;
+        }
+        const u32 binding = attribute.buffer;
+        const u32 offset = attribute.offset;
+        const auto [format, format_bytes] = VertexFormat(attribute);
+        if (binding < Maxwell::NumVertexArrays) {
+            used_bindings |= 1U << binding;
+            attribute_end[binding] = (std::max)(attribute_end[binding], offset + format_bytes);
+        }
+        attributes += fmt::format(
+            R"({}{{"location":{},"binding":{},"offset":{},"format":"{}","bytes":{},"bgra":{},"raw":"{:#010x}"}})",
+            attributes.empty() ? "" : ",", location, binding, offset, format, format_bytes,
+            attribute.bgra != 0, attribute.hex);
+    }
+
+    std::string bindings;
+    buffer_cache.ForEachBoundVertexBuffer([&](u32 index, const auto& binding, u32 bound_size,
+                                              const auto* host, u32 host_offset) {
+        const auto& stream = regs.vertex_streams[index];
+        const u32 stride = stream.stride;
+        const bool instanced = regs.vertex_stream_instances.IsInstancingEnabled(index);
+        const u32 divisor = instanced ? stream.frequency : 1;
+        const bool used = ((used_bindings >> index) & 1) != 0;
+        // The elements the draw reads: vertices, or instances for instanced bindings.
+        std::optional<std::pair<s64, s64>> elements;
+        if (instanced && !is_indirect) {
+            const s64 base = draw_state.base_instance;
+            elements = std::pair{base, divisor == 0 ? base : base + (instances - 1) / divisor};
+        } else if (!instanced) {
+            elements = vertex_range;
+        }
+        // The dumped window: those elements, or the whole binding (capped) when unknown.
+        const u32 element_bytes = (std::max)(stride, attribute_end[index]);
+        u64 begin = 0;
+        u64 end = bound_size;
+        if (stride == 0) {
+            end = (std::min<u64>)(bound_size, attribute_end[index]);
+        } else if (elements) {
+            begin = static_cast<u64>((std::max<s64>)(elements->first, 0)) * stride;
+            end = static_cast<u64>((std::max<s64>)(elements->second, 0)) * stride + element_bytes;
+            end = (std::min<u64>)(end, bound_size);
+        }
+        const bool out_of_range = begin >= end;
+        const u64 window = out_of_range ? 0 : end - begin;
+        const u32 size = static_cast<u32>((std::min<u64>)(window, BUFFER_CAP));
+        bindings += fmt::format(
+            R"({}{{"binding":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","size":{},"stride":{},"instanced":{},"divisor":{},"repacked":{},"used":{},"first_element":{},"last_element":{},"dump_offset":{},"dump_size":{},"dump_truncated":{},"out_of_range":{}}})",
+            bindings.empty() ? "" : ",", index, stream.Address(), binding.device_addr, bound_size,
+            stride, instanced, divisor, buffer_cache_runtime.IsVertexRepacked(index), used,
+            elements ? elements->first : -1, elements ? elements->second : -1, begin, size,
+            window > BUFFER_CAP, out_of_range);
+        if (!used || size == 0) {
+            return;
+        }
+        add_buffer(index, false, stream.Address() + begin, binding.device_addr + begin, bound_size,
+                   size, host ? host->Handle() : VK_NULL_HANDLE,
+                   host_offset + static_cast<u32>(begin));
+    });
+
+    std::string shaders;
+    for (const u64 hash : shader_hashes) {
+        if (hash != 0) {
+            shaders += fmt::format("{}\"{:016x}\"", shaders.empty() ? "" : ",", hash);
+        }
+    }
+    const auto& indirect = maxwell3d->draw_manager.indirect_state;
+    frame_dump.NoteGeometry(fmt::format(
+        R"("shaders":[{}],"indexed":{},"indirect":{},"indirect_address":"{:#x}","topology":{},"vertex_first":{},"vertex_count":{},"base_vertex":{},"base_instance":{},"instance_count":{},"vertex_range":{},"dynamic_vertex_input":{},"vertex_buffers":[{}],"vertex_attributes":[{}],"constant_attributes":[{}],"index_buffer":{})",
+        shaders, is_indexed, is_indirect, is_indirect ? indirect.indirect_start_address : 0,
+        static_cast<u32>(draw_state.topology), draw_state.vertex_buffer.first,
+        draw_state.vertex_buffer.count, base_vertex, draw_state.base_instance,
+        draw_state.instance_count,
+        vertex_range ? fmt::format("[{},{}]", vertex_range->first, vertex_range->second)
+                     : std::string{"null"},
+        dynamic_vertex_input, bindings, attributes, constants, index_json));
+    return frame_dump.NoteBuffers(false, shader_hashes, buffers);
 }
 
 void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
@@ -3213,7 +3498,7 @@ void RasterizerVulkan::TickFrame() {
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
-                           capture->id);
+                           capture->vertex_buffers, capture->id);
         }
         if (const auto change = VideoCore::Nx2Debug::TakeRejectChange()) {
             pipeline_cache.RefreshDebugRejections(change->unrejected);

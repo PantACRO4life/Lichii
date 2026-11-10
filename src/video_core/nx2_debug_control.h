@@ -24,6 +24,9 @@ struct CaptureRequest {
     bool sampled;
     /// The uniform and storage buffers of every draw and dispatch, and dispatch group counts.
     bool buffers;
+    /// With `buffers`: each draw's vertex input, index buffer and draw parameters (kind
+    /// "geometry") and the vertex and index data it reads.
+    bool vertex_buffers{true};
 };
 
 struct CaptureResult {

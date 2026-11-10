@@ -265,13 +265,15 @@ void FrameDump::StopWriter() {
     stop_writer = false;
 }
 
-void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers, u64 id) {
+void FrameDump::Arm(std::filesystem::path directory_, bool sampled, bool buffers,
+                    bool vertex_buffers_, u64 id) {
     if (!schedule.Arm(sampled, buffers, id)) {
         VideoCore::Nx2Debug::FinishCapture(id, {.error = "another capture is in progress"});
         return;
     }
     StopWriter();
     directory = std::move(directory_);
+    vertex_buffers = vertex_buffers_;
     truncated = false;
     recorded_bytes = 0;
     written_bytes = 0;
@@ -488,18 +490,24 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
             compute ? fmt::format(R"("dispatch":{},"after_draws":{})", dispatches, draws)
                     : fmt::format(R"("pass":{},"draw":{})", pass_index, draws - 1);
         const bool from_host = buffer.guest.empty();
+        std::string_view type = buffer.storage ? "storage" : "uniform";
+        if (buffer.vertex) {
+            type = "vertex";
+        }
+        if (buffer.indices) {
+            type = "index";
+        }
         std::string tags = fmt::format(
             R"("kind":"buffer",{},"stage":{},"shader":"{:016x}","type":"{}","index":{},"written":{},"gpu_addr":"{:#x}","device_addr":"{:#x}","bound_size":{},"size":{},"gpu_modified":{},"source":"{}")",
-            owner, buffer.stage, shader,
-            buffer.vertex ? "vertex" : (buffer.storage ? "storage" : "uniform"), buffer.index,
-            buffer.written, buffer.gpu_addr, buffer.device_addr, buffer.bound_size, buffer.size,
+            owner, buffer.stage, shader, type, buffer.index, buffer.written, buffer.gpu_addr,
+            buffer.device_addr, buffer.bound_size, buffer.size,
             buffer.gpu_modified, from_host ? "host" : "guest");
         if (!from_host) {
             const std::pair<u64, u32> large{buffer.device_addr, buffer.size};
             const bool repeat = buffer.size > (1U << 20) &&
                                 std::ranges::find(seen_large_host, large) != seen_large_host.end();
-            if (host_copy && (buffer.storage || buffer.vertex) && buffer.host != VK_NULL_HANDLE &&
-                !repeat) {
+            if (host_copy && (buffer.storage || buffer.vertex || buffer.indices) &&
+                buffer.host != VK_NULL_HANDLE && !repeat) {
                 if (buffer.size > (1U << 20)) {
                     seen_large_host.push_back(large);
                 }
@@ -522,6 +530,11 @@ bool FrameDump::NoteBuffers(bool compute, std::span<const u64> shader_hashes,
         recorded |= RecordBuffer(buffer.host, buffer.host_offset, buffer.size, std::move(tags));
     }
     return recorded;
+}
+
+void FrameDump::NoteGeometry(std::string_view fields) {
+    Enqueue({.tags = fmt::format(R"({{"kind":"geometry","pass":{},"draw":{},{}}})", pass_index,
+                                 draws - 1, fields)});
 }
 
 void FrameDump::NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,

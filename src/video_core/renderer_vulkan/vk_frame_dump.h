@@ -103,13 +103,14 @@ public:
         const Sampler* sampler;
     };
 
-    /// A uniform or storage buffer binding. Its bytes come from guest memory, or from the host
-    /// buffer when the GPU wrote the range and guest memory may be stale.
+    /// A uniform, storage, vertex or index buffer binding. Its bytes come from guest memory, or
+    /// from the host buffer when the GPU wrote the range and guest memory may be stale.
     struct BoundBuffer {
         u32 stage;
         bool storage;
         u32 index;
         bool vertex{};
+        bool indices{};
         bool written;
         GPUVAddr gpu_addr;
         u64 device_addr;
@@ -137,6 +138,11 @@ public:
         return schedule.Capturing() && schedule.Buffers();
     }
 
+    /// Whether each draw's vertex and index buffers and vertex layout are recorded too.
+    [[nodiscard]] bool CapturingVertexBuffers() const noexcept {
+        return CapturingBuffers() && vertex_buffers;
+    }
+
     /// Reads back the textures of the current draw not yet seen in this pass. Returns true when
     /// copies were recorded, which ends the current render pass.
     bool NoteSampled(std::span<const Sampled> textures);
@@ -146,6 +152,9 @@ public:
     /// to run not yet seen for their shader. Returns true when copies were recorded.
     bool NoteBuffers(bool compute, std::span<const u64> shader_hashes,
                      std::span<BoundBuffer> buffers);
+    /// Records the vertex input, index buffer and draw parameters of the current draw: the
+    /// members of one manifest line of kind "geometry", without braces.
+    void NoteGeometry(std::string_view fields);
     /// Records the group counts of the dispatch about to run.
     void NoteLaunch(u64 shader_hash, const std::array<u32, 3>& grid,
                     const std::array<u32, 3>& block, std::optional<GPUVAddr> indirect,
@@ -163,8 +172,10 @@ public:
     void DrainIfFull();
     void TickFrame();
     /// Captures the next frame into `directory` for the debug server, which is told `id` once
-    /// the manifest is complete. Works without EDEN_NX2_FRAME_DUMP.
-    void Arm(std::filesystem::path directory, bool sampled, bool buffers, u64 id);
+    /// the manifest is complete. Works without EDEN_NX2_FRAME_DUMP. `vertex_buffers` adds the
+    /// vertex and index buffers of every draw to a capture with `buffers`.
+    void Arm(std::filesystem::path directory, bool sampled, bool buffers, bool vertex_buffers,
+             u64 id);
 
 private:
     enum class DepthEncoding { None, Unorm16, Unorm24, Float32 };
@@ -225,6 +236,8 @@ private:
     Scheduler& scheduler;
 
     FrameDumpSchedule schedule;
+    /// Vertex and index buffers with the other buffers; on for EDEN_NX2_FRAME_DUMP_SAMPLED.
+    bool vertex_buffers{true};
     bool truncated{};
     std::filesystem::path directory;
     std::chrono::steady_clock::time_point start;
