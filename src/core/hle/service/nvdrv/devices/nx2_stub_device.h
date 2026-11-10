@@ -108,6 +108,9 @@ public:
         }
         std::vector<std::pair<u64, u64>> leftovers;
         for (const auto& range : ranges) {
+            // flags 1: unmapped by a destroy of the memory (nx2:gpu 102)
+            Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::RegUnmap, range.gpu_address, 0, 0,
+                                      range.size, 0, 1);
             TrimMappings(range.gpu_address, range.size);
             for (auto& [owner, listener] : listeners) {
                 listener.unmap(range.gpu_address, range.size);

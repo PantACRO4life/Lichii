@@ -36,6 +36,8 @@ enum class Kind : u8 {
                    ///< device = its result
     StaleRange,    ///< a reused device range read old pages (nvhost_as_gpu Nx2RefreshBacking):
                    ///< handle = stale pages, flags = 1 when mapped again
+    MemRelease,    ///< nx2:gpu 102 destroy releases the memory's device range after its unmaps:
+                   ///< cpu range, handle
     Count,
 };
 

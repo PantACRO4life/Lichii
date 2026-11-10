@@ -642,6 +642,8 @@ private:
                 }
                 // No GPU range reaches the memory any more: free its device range, so registering
                 // the address again gets a new one on the pages it has then.
+                Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemRelease, 0, address, 0, size,
+                                          handle);
                 registry.ReleaseBacking(address, size);
             }
             if (size == 0x2000) {

@@ -99,7 +99,7 @@ const char* KindName(Kind kind) {
         "mem_create",   "mem_destroy", "reg_map",     "reg_unmap",    "reg_release",
         "sparse_create", "sparse_destroy", "sparse_back", "sparse_tile", "device_range",
         "gmmu_map",     "gmmu_unmap",  "smmu_release", "gpu_attribute", "memory_svc",
-        "stale_range",
+        "stale_range",  "mem_release",
     };
     const auto index = static_cast<size_t>(kind);
     return index < names.size() ? names[index] : "unknown";
