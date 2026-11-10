@@ -72,7 +72,21 @@
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+// Xlib (pulled in by the Vulkan headers on Linux) defines Success, None, Bool and Status as
+// macros, which break NvResult::Success and friends in the nvdrv headers.
+#pragma push_macro("Success")
+#pragma push_macro("None")
+#pragma push_macro("Bool")
+#pragma push_macro("Status")
+#undef Success
+#undef None
+#undef Bool
+#undef Status
 #include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
+#pragma pop_macro("Status")
+#pragma pop_macro("Bool")
+#pragma pop_macro("None")
+#pragma pop_macro("Success")
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
