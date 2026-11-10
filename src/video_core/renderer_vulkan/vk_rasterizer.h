@@ -9,6 +9,9 @@
 #include <array>
 #include <optional>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include <boost/container/static_vector.hpp>
 
@@ -263,6 +266,15 @@ private:
     /// vertex and index data it reads, for the frame dump.
     bool FrameDumpGeometry(bool is_indexed, bool is_indirect, bool dynamic_vertex_input,
                            std::span<const u64> shader_hashes);
+    /// Nx2BadMesh: whether an indexed draw reads vertices past the end of its vertex buffer, from
+    /// its index data read at most every ~2-3 s per index range. Each bad index range is logged
+    /// once (what its GPU address translates to at each step, and its mapping history); true
+    /// when EDEN_NX2_BAD_MESH_SKIP=1 asks to leave the draw out.
+    bool CheckBadMesh(bool is_indexed, bool is_indirect, std::span<const u64> shader_hashes);
+    /// Nx2BadMesh with EDEN_NX2_BAD_MESH_RETRANSLATE=1, at frame end: maps the stale device pages
+    /// of each newly found bad mesh again, drops the caches' copies, reads it again and logs
+    /// whether it is a valid mesh now.
+    void ProcessBadMeshRetranslates();
 
     Tegra::GPU& gpu;
     Tegra::MaxwellDeviceMemoryManager& device_memory;
@@ -326,6 +338,34 @@ private:
     } oot_actor, oot_previous_actor;
 #endif
     u64 render_trace_frame = 0;
+    struct BadMeshScan {
+        const Tegra::MemoryManager* memory{};
+        u32 count{};
+        u32 format_bytes{};
+        bool restart{};
+        u32 restart_index{};
+        u64 scan_frame{};
+        u32 max_index{};
+        bool any{};     ///< at least one index was read
+        bool unknown{}; ///< not read: unmapped, or written by the GPU
+    };
+    /// Keyed by the GPU address of the draw's first index.
+    std::unordered_map<GPUVAddr, BadMeshScan> bad_mesh_scans;
+    std::unordered_set<GPUVAddr> bad_mesh_logged;
+    struct BadMeshRetranslate {
+        const Tegra::MemoryManager* memory;
+        GPUVAddr ib_gpu;
+        u64 ib_bytes;
+        u32 format_bytes;
+        bool restart;
+        u32 restart_index;
+        s64 base_vertex;
+        GPUVAddr vb_gpu;
+        u64 vb_bytes;
+        u32 vb_stride;
+    };
+    std::vector<BadMeshRetranslate> bad_mesh_retranslates;
+    std::vector<u8> bad_mesh_scratch;
     u32 render_trace_draws = 0;
     u32 render_trace_clears = 0;
     bool pending_native_work{};

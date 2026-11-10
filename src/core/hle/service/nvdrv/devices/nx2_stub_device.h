@@ -5,12 +5,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <compare>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -272,7 +274,9 @@ public:
         return cpu_address ? DeviceAddressOf(*cpu_address) : std::nullopt;
     }
 
-    /// The recorded mapping that holds gpu_address (diagnostics, Nx2BadMesh).
+    /// The recorded mapping that holds gpu_address (diagnostics, Nx2BadMesh). Called from the
+    /// GPU thread, so it never waits long for the lock: its holders can wait for the GPU thread
+    /// (MapInOrder with a full queue, or synchronous GPU). Empty and `busy` set when it is held.
     struct MappingInfo {
         u64 gpu_address;
         u64 cpu_address;
@@ -280,8 +284,14 @@ public:
         u32 handle;
         u64 offset;
     };
-    std::optional<MappingInfo> FindMapping(u64 gpu_address) {
-        std::scoped_lock lk{mutex};
+    std::optional<MappingInfo> FindMapping(u64 gpu_address, bool* busy = nullptr) {
+        std::unique_lock lk{mutex, std::defer_lock};
+        if (!TryLockBriefly(lk)) {
+            if (busy != nullptr) {
+                *busy = true;
+            }
+            return std::nullopt;
+        }
         for (auto it = mappings.rbegin(); it != mappings.rend(); ++it) {
             if (gpu_address >= it->gpu_address && gpu_address - it->gpu_address < it->size) {
                 return MappingInfo{it->gpu_address, it->cpu_address, it->size, it->handle,
@@ -291,9 +301,15 @@ public:
         return std::nullopt;
     }
 
-    /// Whether [gpu_address, +size) lies in a sparse or GPU-only region (diagnostics).
-    std::optional<std::pair<u64, u64>> FindSparseRegion(u64 gpu_address) {
-        std::scoped_lock lk{mutex};
+    /// The sparse or GPU-only region holding gpu_address (diagnostics, as FindMapping).
+    std::optional<std::pair<u64, u64>> FindSparseRegion(u64 gpu_address, bool* busy = nullptr) {
+        std::unique_lock lk{mutex, std::defer_lock};
+        if (!TryLockBriefly(lk)) {
+            if (busy != nullptr) {
+                *busy = true;
+            }
+            return std::nullopt;
+        }
         auto it = sparse_regions.upper_bound(gpu_address);
         if (it == sparse_regions.begin()) {
             return std::nullopt;
@@ -306,6 +322,17 @@ public:
     }
 
 private:
+    /// Up to ~10 ms of tries.
+    static bool TryLockBriefly(std::unique_lock<std::mutex>& lock) {
+        for (int attempt = 0; attempt < 100; ++attempt) {
+            if (lock.try_lock()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds{100});
+        }
+        return false;
+    }
+
     // Separate lock: ranges are recorded from listeners that run under `mutex`.
     std::mutex device_mutex;
     std::map<u64, std::pair<u64, u64>> device_ranges; // cpu start -> (size, device address)
