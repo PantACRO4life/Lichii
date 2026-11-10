@@ -10,6 +10,7 @@
 #include <cstring>
 #include <type_traits>
 
+#include "common/nx2_map_log.h"
 #include "core/arm/arm_interface.h"
 #include "core/core.h"
 #include "core/hle/kernel/k_process.h"
@@ -2568,9 +2569,36 @@ void Call(Core::System& system, u32 imm) {
         }
         LOG_DEBUG(Kernel_SVC, "Switch 2 svc 0x80 addr={:#x} size={:#x} mask={:#x} attr={:#x} -> {:#x}",
                   address, size, mask, attr, result.raw);
+        // Nx2BadMesh history: GPU-accessible memory is set up and torn down through this.
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::GpuAttribute, 0, address, result.raw,
+                                  size, mask, static_cast<u8>(attr));
         args[0] = result.raw;
     } else if (process.Is64Bit()) {
+        // Nx2BadMesh history: heap and physical memory changes, which can give a CPU range new
+        // pages behind the device (SMMU) mapping made from it earlier.
+        const bool memory_svc = imm == 0x01 || imm == 0x04 || imm == 0x05 || imm == 0x2C ||
+                                imm == 0x2D;
+        const u64 in0 = GetArg64(args, 0);
+        const u64 in1 = GetArg64(args, 1);
+        const u64 in2 = GetArg64(args, 2);
         Call64(system, imm, args);
+        if (memory_svc) {
+            const u64 result = GetArg64(args, 0);
+            if (imm == 0x01) {
+                // SetHeapSize(size): the heap base comes back in x1.
+                Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemorySvc, GetArg64(args, 1),
+                                          GetArg64(args, 1), result, in1, 0,
+                                          static_cast<u8>(imm));
+            } else if (imm == 0x04 || imm == 0x05) {
+                // MapMemory/UnmapMemory(dst, src, size)
+                Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemorySvc, in0, in1, result,
+                                          in2, 0, static_cast<u8>(imm));
+            } else {
+                // MapPhysicalMemory/UnmapPhysicalMemory(address, size)
+                Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemorySvc, in0, in0, result,
+                                          in1, 0, static_cast<u8>(imm));
+            }
+        }
     } else {
         Call32(system, imm, args);
     }

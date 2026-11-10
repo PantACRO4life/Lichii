@@ -29,6 +29,7 @@
 #include "common/div_ceil.h"
 #include "common/dkb_frame_trace.h"
 #include "common/game_presets.h"
+#include "common/nx2_map_log.h"
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/core.h"
@@ -521,6 +522,8 @@ private:
         // GpuMemoryHandle that later map jobs (211) name.
         const u32 handle = m_next_memory_handle++;
         m_memory[handle] = {start, last - start + 1};
+        Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemCreate, start, start, 0,
+                                  last - start + 1, handle);
         TipcReplyWords(ctx, {handle});
     }
 
@@ -607,6 +610,8 @@ private:
             const auto [address, size] = it->second;
             LOG_DEBUG(Service, "nx2:gpu 102 destroy handle={} [{:#x}, +{:#x}] slot={}", handle,
                       address, size, w[3]);
+            Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::MemDestroy, address, address, 0,
+                                      size, handle);
             if (size != 0) {
                 Nvidia::Devices::Nx2GpuMemoryRegistry::Get().Unmap(address, size);
             }
@@ -1802,6 +1807,7 @@ private:
             m_vsync->trace_present.store(m_presents, std::memory_order_relaxed);
         }
         const u64 present = Core::g_nx2_present_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        Common::Nx2MapLog::SetFrame(present);
         if (Core::g_nx2_present_time_services.load(std::memory_order_relaxed) != 0) {
             const u64 present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now().time_since_epoch())
