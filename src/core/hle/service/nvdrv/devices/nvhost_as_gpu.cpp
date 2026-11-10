@@ -90,6 +90,11 @@ void Nx2RefreshBacking(Tegra::MaxwellDeviceMemoryManager& smmu, Core::Memory::Me
                     (size + PageSize - 1) / PageSize, first_stale,
                     fix ? ", mapped again" : ", left as is (EDEN_NX2_STALE_MAP_FIX=0)");
     }
+    // Nx2BadMesh history: flags 1 = mapped again, 0 = left stale (EDEN_NX2_STALE_MAP_FIX=0);
+    // handle = number of stale pages.
+    Common::Nx2MapLog::Record(Common::Nx2MapLog::Kind::StaleRange, 0, cpu_address,
+                              device_address, size, static_cast<u32>(stale_pages),
+                              static_cast<u8>(fix));
     if (!fix) {
         return;
     }
