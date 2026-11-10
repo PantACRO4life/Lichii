@@ -3436,20 +3436,21 @@ bool RasterizerVulkan::CheckBadMesh(bool is_indexed, bool is_indirect,
     }
 
     // The binding of the first attribute read from a buffer (the position, as a rule).
-    u32 check_binding = Maxwell::NumVertexArrays;
+    constexpr u32 no_binding = static_cast<u32>(Maxwell::NumVertexArrays);
+    u32 check_binding = no_binding;
     u32 used_bindings = 0;
     for (u32 location = 0; location < Maxwell::NumVertexAttributes; ++location) {
         const Maxwell::VertexAttribute attribute{regs.vertex_attrib_format[location]};
         const u32 attribute_binding = attribute.buffer;
-        if (attribute.constant || attribute_binding >= Maxwell::NumVertexArrays) {
+        if (attribute.constant || attribute_binding >= no_binding) {
             continue;
         }
         used_bindings |= 1U << attribute_binding;
-        if (check_binding == Maxwell::NumVertexArrays) {
+        if (check_binding == no_binding) {
             check_binding = attribute_binding;
         }
     }
-    if (check_binding == Maxwell::NumVertexArrays ||
+    if (check_binding == no_binding ||
         regs.vertex_stream_instances.IsInstancingEnabled(check_binding)) {
         return false;
     }
@@ -3486,7 +3487,8 @@ bool RasterizerVulkan::CheckBadMesh(bool is_indexed, bool is_indirect,
     const IndexStats cpu_stats =
         ScanIndices(ib_view.cpu_bytes, format_bytes, restart, restart_index);
     const auto fits = [&](const IndexStats& stats) {
-        return stats.Any() && (s64{stats.max_index} + base_vertex) * stride < bound_size;
+        return stats.Any() &&
+               (s64{stats.max_index} + base_vertex) * stride < static_cast<s64>(bound_size);
     };
     std::string_view verdict;
     if (IsStaleSmmu(ib_view.smmu) || IsStaleSmmu(vb_view.smmu)) {
