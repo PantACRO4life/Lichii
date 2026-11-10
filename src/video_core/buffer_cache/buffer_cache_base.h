@@ -505,6 +505,28 @@ public:
         }
     }
 
+    /// Visits the vertex buffers bound for the last draw with the cached host buffer holding each
+    /// range, if one does, for diagnostics. Nothing is created or synchronized.
+    template <typename Func>
+    void ForEachBoundVertexBuffer(Func&& func) {
+        for (u32 index = 0; index < NUM_VERTEX_BUFFERS; ++index) {
+            const Binding& binding = channel_state->vertex_buffers[index];
+            if (binding.device_addr == 0 || binding.size == 0) {
+                continue;
+            }
+            const Buffer* host = nullptr;
+            u32 offset = 0;
+            if (const BufferId id = page_table[binding.device_addr >> CACHING_PAGEBITS]) {
+                const Buffer& buffer = slot_buffers[id];
+                if (buffer.IsInBounds(binding.device_addr, binding.size)) {
+                    host = &buffer;
+                    offset = buffer.Offset(binding.device_addr);
+                }
+            }
+            func(index, binding, binding.size, host, offset);
+        }
+    }
+
     /// Return true when a region is registered on the cache
     [[nodiscard]] bool IsRegionRegistered(DAddr addr, size_t size);
 
