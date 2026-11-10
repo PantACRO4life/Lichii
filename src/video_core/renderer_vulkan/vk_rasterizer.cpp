@@ -14,6 +14,7 @@
 #include <limits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <tuple>
 #include <set>
@@ -31,6 +32,7 @@
 #include "common/dkb_frame_trace.h"
 #include "shader_recompiler/exception.h"
 #include "common/logging.h"
+#include "common/nx2_map_log.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -71,6 +73,7 @@
 #include "video_core/textures/texture.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
+#include "core/hle/service/nvdrv/devices/nx2_stub_device.h"
 #include "video_core/memory_manager.h"
 #include "video_core/nx2.h"
 #include "video_core/nx2_debug_control.h"
@@ -1071,6 +1074,12 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         if (recorded) {
             scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
         }
+    }
+    // Nx2BadMesh: indices past the end of the vertex buffer (logged once per index range);
+    // EDEN_NX2_BAD_MESH_SKIP=1 leaves such draws out.
+    if (CheckBadMesh(is_indexed, is_indirect, pipeline->ShaderHashes())) {
+        submitted = true; // left out on purpose, not a failed native draw
+        return;
     }
     if (VideoCommon::RenderTrace::SampleFrame(render_trace_frame) && render_trace_draws <= 2048) {
         LOG_DEBUG(Render_Vulkan,
@@ -3206,6 +3215,412 @@ bool RasterizerVulkan::FrameDumpBuffers(bool compute, std::span<const u64> shade
     return frame_dump.NoteBuffers(compute, shader_hashes, buffers);
 }
 
+namespace {
+
+using Nx2Registry = ::Service::Nvidia::Devices::Nx2GpuMemoryRegistry;
+
+/// Index data the bad-mesh check reads per index range at most.
+constexpr u64 BAD_MESH_SCAN_CAP = 1ULL << 20;
+/// Bytes of a range a bad-mesh report shows.
+constexpr size_t BAD_MESH_DUMP_BYTES = 64;
+
+struct IndexStats {
+    u32 min_index = (std::numeric_limits<u32>::max)();
+    u32 max_index = 0;
+    [[nodiscard]] bool Any() const {
+        return min_index <= max_index;
+    }
+};
+
+template <typename T>
+void ScanIndicesAs(std::span<const u8> data, bool restart, u32 restart_index, IndexStats& stats) {
+    const size_t count = data.size() / sizeof(T);
+    for (size_t i = 0; i < count; ++i) {
+        T value;
+        std::memcpy(&value, data.data() + i * sizeof(T), sizeof(T));
+        const u32 index = value;
+        if (restart && index == restart_index) {
+            continue;
+        }
+        stats.min_index = (std::min)(stats.min_index, index);
+        stats.max_index = (std::max)(stats.max_index, index);
+    }
+}
+
+IndexStats ScanIndices(std::span<const u8> data, u32 format_bytes, bool restart,
+                       u32 restart_index) {
+    IndexStats stats{};
+    switch (format_bytes) {
+    case 1:
+        ScanIndicesAs<u8>(data, restart, restart_index, stats);
+        break;
+    case 2:
+        ScanIndicesAs<u16>(data, restart, restart_index, stats);
+        break;
+    case 4:
+        ScanIndicesAs<u32>(data, restart, restart_index, stats);
+        break;
+    default:
+        break;
+    }
+    return stats;
+}
+
+std::string HexBytes(std::span<const u8> bytes) {
+    std::string text;
+    text.reserve(bytes.size() * 2);
+    for (const u8 byte : bytes) {
+        text += fmt::format("{:02x}", byte);
+    }
+    return text;
+}
+
+std::string IndexStatsJson(const IndexStats& stats) {
+    if (!stats.Any()) {
+        return "null";
+    }
+    return fmt::format(R"({{"min_index":{},"max_index":{}}})", stats.min_index, stats.max_index);
+}
+
+/// What a GPU range translates to right now, at each step, for a bad-mesh report.
+struct GpuRangeView {
+    GPUVAddr gpu{};
+    std::optional<DAddr> device;      ///< GMMU translation now
+    std::optional<Nx2Registry::MappingInfo> mapping;
+    u64 mapping_cpu{};                ///< the CPU address the registry maps `gpu` to (0: none)
+    std::optional<u64> registry_device; ///< device address recorded for mapping_cpu
+    std::optional<std::pair<u64, u64>> sparse_region;
+    bool registry_busy{};             ///< the registry lock was held, mapping unknown
+    Tegra::MaxwellDeviceMemoryManager::BackingCheck smmu{};
+    std::vector<u8> device_bytes;     ///< what the GPU reads
+    std::vector<u8> cpu_bytes;        ///< what the registry's CPU address holds
+    bool cpu_read{};
+};
+
+GpuRangeView ViewGpuRange(const Tegra::MemoryManager& gpu_memory,
+                          Tegra::MaxwellDeviceMemoryManager& device_memory, GPUVAddr gpu,
+                          size_t bytes) {
+    auto& registry = Nx2Registry::Get();
+    GpuRangeView view{};
+    view.gpu = gpu;
+    view.device = gpu_memory.GpuToCpuAddress(gpu);
+    view.mapping = registry.FindMapping(gpu, &view.registry_busy);
+    if (view.mapping) {
+        view.mapping_cpu = view.mapping->cpu_address + (gpu - view.mapping->gpu_address);
+        view.registry_device = registry.DeviceAddressOf(view.mapping_cpu);
+    }
+    view.sparse_region = registry.FindSparseRegion(gpu, &view.registry_busy);
+    if (view.device) {
+        view.smmu = device_memory.CheckBacking(*view.device);
+        view.device_bytes.resize(bytes);
+        gpu_memory.ReadBlockUnsafe(gpu, view.device_bytes.data(), bytes);
+    }
+    // The CPU memory behind the registry's mapping, through the process that owns the device
+    // pages (else the first registered one).
+    const u64 cpu = view.mapping_cpu != 0 ? view.mapping_cpu : view.smmu.cpu_address;
+    if (cpu != 0) {
+        view.cpu_bytes.resize(bytes);
+        view.cpu_read = device_memory.ReadProcessMemory(view.smmu.asid, cpu, view.cpu_bytes.data(),
+                                                        bytes);
+        if (!view.cpu_read) {
+            view.cpu_bytes.clear();
+        }
+    }
+    return view;
+}
+
+bool IsStaleSmmu(const Tegra::MaxwellDeviceMemoryManager::BackingCheck& check) {
+    return check.mapped && check.cpu_mapped && check.device_physical != check.cpu_physical;
+}
+
+std::string GpuRangeJson(const GpuRangeView& view) {
+    const auto& smmu = view.smmu;
+    const size_t dump = BAD_MESH_DUMP_BYTES;
+    return fmt::format(
+        R"({{"gpu":"{:#x}","gmmu_device":{},"registry_busy":{},"registry_mapping":{},"registry_cpu":"{:#x}","registry_device":{},"sparse_region":{},"smmu":{{"mapped":{},"asid":{},"cpu":"{:#x}","device_physical":"{:#x}","cpu_physical":"{:#x}","cpu_mapped":{},"stale":{}}},"device_bytes":"{}","cpu_bytes":{}}})",
+        view.gpu,
+        view.device ? fmt::format("\"{:#x}\"", *view.device) : std::string{"null"},
+        view.registry_busy,
+        view.mapping ? fmt::format(
+                           R"({{"gpu":"{:#x}","cpu":"{:#x}","size":"{:#x}","handle":{},"offset":"{:#x}"}})",
+                           view.mapping->gpu_address, view.mapping->cpu_address,
+                           view.mapping->size, view.mapping->handle, view.mapping->offset)
+                     : std::string{"null"},
+        view.mapping_cpu,
+        view.registry_device ? fmt::format("\"{:#x}\"", *view.registry_device)
+                             : std::string{"null"},
+        view.sparse_region ? fmt::format(R"(["{:#x}","{:#x}"])", view.sparse_region->first,
+                                         view.sparse_region->second)
+                           : std::string{"null"},
+        smmu.mapped, smmu.asid, smmu.cpu_address, smmu.device_physical, smmu.cpu_physical,
+        smmu.cpu_mapped, IsStaleSmmu(smmu),
+        HexBytes(std::span<const u8>{view.device_bytes}.first(
+            (std::min)(dump, view.device_bytes.size()))),
+        view.cpu_read ? fmt::format("\"{}\"", HexBytes(std::span<const u8>{view.cpu_bytes}.first(
+                                                  (std::min)(dump, view.cpu_bytes.size()))))
+                      : std::string{"null"});
+}
+
+std::string EventsJson(const std::vector<Common::Nx2MapLog::Event>& events) {
+    std::string text;
+    for (const auto& event : events) {
+        text += text.empty() ? "" : ",";
+        text += Common::Nx2MapLog::ToJson(event);
+    }
+    return text;
+}
+
+bool BadMeshSwitch(const char* name) {
+    const char* const value = std::getenv(name);
+    return value != nullptr && std::string_view{value} == "1";
+}
+
+} // Anonymous namespace
+
+bool RasterizerVulkan::CheckBadMesh(bool is_indexed, bool is_indirect,
+                                    std::span<const u64> shader_hashes) {
+    if (!is_indexed || is_indirect || mesh_draw || gpu_memory == nullptr) {
+        return false;
+    }
+    const auto& draw_state = maxwell3d->draw_manager.draw_state;
+    const auto& index = draw_state.index_buffer;
+    if (!draw_state.inline_index_draw_indexes.empty() || index.count == 0) {
+        return false;
+    }
+    const auto& regs = maxwell3d->regs;
+    const u32 format_bytes = static_cast<u32>(index.FormatSizeInBytes());
+    const GPUVAddr ib_gpu = index.StartAddress() + u64{index.first} * format_bytes;
+    const bool restart = regs.primitive_restart.enabled != 0;
+    const u32 restart_index = regs.primitive_restart.index;
+    const u64 ib_bytes = (std::min)(u64{index.count} * format_bytes, BAD_MESH_SCAN_CAP);
+
+    // The index range's extremes, read again every ~2-3 s (staggered per range) or when the draw
+    // reads it differently.
+    if (bad_mesh_scans.size() > 65536) {
+        bad_mesh_scans.clear();
+    }
+    auto [it, inserted] = bad_mesh_scans.try_emplace(ib_gpu);
+    BadMeshScan& scan = it->second;
+    const u64 period = 128 + ((ib_gpu >> 8) & 63);
+    if (inserted || scan.memory != gpu_memory || scan.count != index.count ||
+        scan.format_bytes != format_bytes || scan.restart != restart ||
+        scan.restart_index != restart_index || render_trace_frame - scan.scan_frame >= period) {
+        scan = BadMeshScan{
+            .memory = gpu_memory,
+            .count = index.count,
+            .format_bytes = format_bytes,
+            .restart = restart,
+            .restart_index = restart_index,
+            .scan_frame = render_trace_frame,
+        };
+        const std::optional<DAddr> ib_device = gpu_memory->GpuToCpuAddress(ib_gpu);
+        // GPU-written index data is newer on the host than in guest memory: leave it.
+        if (!ib_device || buffer_cache.IsRegionGpuModified(*ib_device, ib_bytes)) {
+            scan.unknown = true;
+        } else {
+            bad_mesh_scratch.resize(ib_bytes);
+            gpu_memory->ReadBlockUnsafe(ib_gpu, bad_mesh_scratch.data(), ib_bytes);
+            const IndexStats stats =
+                ScanIndices(bad_mesh_scratch, format_bytes, restart, restart_index);
+            scan.any = stats.Any();
+            scan.max_index = stats.max_index;
+        }
+    }
+    if (scan.unknown || !scan.any) {
+        return false;
+    }
+    const s64 base_vertex = static_cast<s32>(draw_state.base_index);
+    const s64 top = s64{scan.max_index} + base_vertex;
+    if (top < 0) {
+        return false;
+    }
+
+    // The binding of the first attribute read from a buffer (the position, as a rule).
+    u32 check_binding = Maxwell::NumVertexArrays;
+    u32 used_bindings = 0;
+    for (u32 location = 0; location < Maxwell::NumVertexAttributes; ++location) {
+        const Maxwell::VertexAttribute attribute{regs.vertex_attrib_format[location]};
+        const u32 attribute_binding = attribute.buffer;
+        if (attribute.constant || attribute_binding >= Maxwell::NumVertexArrays) {
+            continue;
+        }
+        used_bindings |= 1U << attribute_binding;
+        if (check_binding == Maxwell::NumVertexArrays) {
+            check_binding = attribute_binding;
+        }
+    }
+    if (check_binding == Maxwell::NumVertexArrays ||
+        regs.vertex_stream_instances.IsInstancingEnabled(check_binding)) {
+        return false;
+    }
+    const u32 stride = regs.vertex_streams[check_binding].stride;
+    u32 bound_size = 0;
+    bool bound = false;
+    buffer_cache.ForEachBoundVertexBuffer(
+        [&](u32 binding_index, const auto&, u32 size, const auto*, u32) {
+            if (binding_index == check_binding) {
+                bound_size = size;
+                bound = true;
+            }
+        });
+    // A vertex starting at or past the end of the binding has no data.
+    if (!bound || stride == 0 || u64(top) * stride < bound_size) {
+        return false;
+    }
+
+    static const bool skip = BadMeshSwitch("EDEN_NX2_BAD_MESH_SKIP");
+    static const bool retranslate = BadMeshSwitch("EDEN_NX2_BAD_MESH_RETRANSLATE");
+    Common::Nx2MapLog::CountBadDraw(skip);
+    if (bad_mesh_logged.size() >= 4096 || !bad_mesh_logged.insert(ib_gpu).second) {
+        return skip;
+    }
+
+    // First time for this index range: report what each translation step gives now.
+    const GPUVAddr vb_gpu = regs.vertex_streams[check_binding].Address();
+    const GpuRangeView ib_view = ViewGpuRange(*gpu_memory, device_memory, ib_gpu, ib_bytes);
+    const GpuRangeView vb_view =
+        ViewGpuRange(*gpu_memory, device_memory, vb_gpu,
+                     (std::min<size_t>)(bound_size, BAD_MESH_DUMP_BYTES));
+    const IndexStats device_stats =
+        ScanIndices(ib_view.device_bytes, format_bytes, restart, restart_index);
+    const IndexStats cpu_stats =
+        ScanIndices(ib_view.cpu_bytes, format_bytes, restart, restart_index);
+    const auto fits = [&](const IndexStats& stats) {
+        return stats.Any() && (s64{stats.max_index} + base_vertex) * stride < bound_size;
+    };
+    std::string_view verdict;
+    if (IsStaleSmmu(ib_view.smmu) || IsStaleSmmu(vb_view.smmu)) {
+        verdict = "stale SMMU: the device pages read memory their CPU address no longer has";
+    } else if (ib_view.mapping_cpu != 0 && ib_view.smmu.cpu_address != 0 &&
+               ib_view.mapping_cpu != ib_view.smmu.cpu_address) {
+        verdict = "stale GMMU: the GPU address reaches a device range made for another CPU "
+                  "address than the registry maps it to";
+    } else if (ib_view.cpu_read && fits(cpu_stats)) {
+        verdict = "the CPU memory behind the mapping holds a valid mesh, the GPU reads other data";
+    } else {
+        verdict = "the memory behind this GPU address holds no mesh (reused by the game, or a "
+                  "missed write)";
+    }
+
+    std::string bindings;
+    buffer_cache.ForEachBoundVertexBuffer(
+        [&](u32 binding_index, const auto& binding, u32 size, const auto*, u32) {
+            if (((used_bindings >> binding_index) & 1) == 0) {
+                return;
+            }
+            const auto& stream = regs.vertex_streams[binding_index];
+            bindings += fmt::format(
+                R"({}{{"binding":{},"gpu":"{:#x}","device":"{:#x}","size":{},"stride":{},"instanced":{}}})",
+                bindings.empty() ? "" : ",", binding_index, stream.Address(), binding.device_addr,
+                size, u32{stream.stride},
+                regs.vertex_stream_instances.IsInstancingEnabled(binding_index));
+        });
+    const u64 ib_cpu = ib_view.mapping_cpu != 0 ? ib_view.mapping_cpu : ib_view.smmu.cpu_address;
+    const auto events = Common::Nx2MapLog::Find(ib_gpu, ib_cpu, ib_view.device.value_or(0),
+                                                (std::max<u64>)(ib_bytes, bound_size), 48);
+    const u64 vs = shader_hashes.size() > 1 ? shader_hashes[1] : 0;
+    const u64 fs = shader_hashes.size() > 5 ? shader_hashes[5] : 0;
+    const auto [bad_draws, skipped_draws] = Common::Nx2MapLog::BadDrawCounts();
+    std::string report = fmt::format(
+        R"({{"frame":{},"present":{},"vs":"{:016x}","fs":"{:016x}","skip":{},"retranslate":{},"bad_draws":{},"skipped_draws":{},"index":{{"gpu":"{:#x}","start":"{:#x}","first":{},"count":{},"format":"u{}","base_vertex":{},"max_index":{},"restart":{},"scanned_bytes":{}}},"device_view":{},"cpu_view":{},"vertex_binding":{},"vertex_gpu":"{:#x}","vertex_bound_size":{},"vertex_stride":{},"bindings":[{}],"verdict":"{}","ib":{},"vb":{},"events":[{}]}})",
+        render_trace_frame, Common::Nx2MapLog::Frame(), vs, fs, skip, retranslate, bad_draws,
+        skipped_draws, ib_gpu, index.StartAddress(), index.first, index.count, format_bytes * 8,
+        base_vertex, scan.max_index, restart, ib_bytes, IndexStatsJson(device_stats),
+        IndexStatsJson(cpu_stats), check_binding, vb_gpu, bound_size, stride, bindings, verdict,
+        GpuRangeJson(ib_view), GpuRangeJson(vb_view), EventsJson(events));
+    LOG_WARNING(Render_Vulkan,
+                "Nx2BadMesh: indices {:#x} ({} x u{}, max {} + base {}) pass the end of vertex "
+                "binding {} at {:#x} ({} bytes, stride {}); vs={:016x} fs={:016x}; GMMU device "
+                "{:#x}, registry CPU {:#x} (device {:#x}), SMMU CPU {:#x} physical {:#x} vs CPU "
+                "physical {:#x}; CPU view max {}; {}{}",
+                ib_gpu, index.count, format_bytes * 8, scan.max_index, base_vertex, check_binding,
+                vb_gpu, bound_size, stride, vs, fs, ib_view.device.value_or(0), ib_view.mapping_cpu,
+                ib_view.registry_device.value_or(0), ib_view.smmu.cpu_address,
+                ib_view.smmu.device_physical, ib_view.smmu.cpu_physical,
+                cpu_stats.Any() ? s64{cpu_stats.max_index} : -1, verdict,
+                skip ? " (draw skipped)" : "");
+    for (const auto& event : events) {
+        LOG_WARNING(Render_Vulkan, "Nx2BadMesh event for {:#x}: {}", ib_gpu,
+                    Common::Nx2MapLog::ToJson(event));
+    }
+    LOG_WARNING(Render_Vulkan, "Nx2BadMesh report: {}", report);
+    Common::Nx2MapLog::AddBadMesh(std::move(report));
+
+    if (retranslate) {
+        bad_mesh_retranslates.push_back(BadMeshRetranslate{
+            .memory = gpu_memory,
+            .ib_gpu = ib_gpu,
+            .ib_bytes = ib_bytes,
+            .format_bytes = format_bytes,
+            .restart = restart,
+            .restart_index = restart_index,
+            .base_vertex = base_vertex,
+            .vb_gpu = vb_gpu,
+            .vb_bytes = bound_size,
+            .vb_stride = stride,
+        });
+    }
+    return skip;
+}
+
+void RasterizerVulkan::ProcessBadMeshRetranslates() {
+    if (bad_mesh_retranslates.empty()) {
+        return;
+    }
+    const auto requests = std::exchange(bad_mesh_retranslates, {});
+    for (const BadMeshRetranslate& request : requests) {
+        if (request.memory != gpu_memory || gpu_memory == nullptr) {
+            LOG_WARNING(Render_Vulkan,
+                        "Nx2BadMesh retranslate {:#x}: its address space is not the current one, "
+                        "skipped",
+                        request.ib_gpu);
+            continue;
+        }
+        const std::optional<DAddr> ib_before = gpu_memory->GpuToCpuAddress(request.ib_gpu);
+        const std::optional<DAddr> vb_before = gpu_memory->GpuToCpuAddress(request.vb_gpu);
+        // Device pages whose CPU address has other memory now are mapped again from it, then the
+        // caches drop what they kept of both ranges, so the next draw uploads from memory.
+        size_t refreshed = 0;
+        for (const auto& [range_gpu, range_bytes] :
+             {std::pair{request.ib_gpu, request.ib_bytes},
+              std::pair{request.vb_gpu, request.vb_bytes}}) {
+            for (const auto& [range_device, range_size] :
+                 gpu_memory->GetSubmappedDeviceRange(range_gpu, range_bytes)) {
+                refreshed += device_memory.RefreshStaleBacking(range_device, range_size);
+                InvalidateRegion(range_device, range_size, VideoCommon::CacheType::All);
+            }
+        }
+        const std::optional<DAddr> ib_after = gpu_memory->GpuToCpuAddress(request.ib_gpu);
+        IndexStats stats{};
+        if (ib_after) {
+            bad_mesh_scratch.resize(request.ib_bytes);
+            gpu_memory->ReadBlockUnsafe(request.ib_gpu, bad_mesh_scratch.data(), request.ib_bytes);
+            stats = ScanIndices(bad_mesh_scratch, request.format_bytes, request.restart,
+                                request.restart_index);
+        }
+        const bool valid = stats.Any() && request.vb_stride != 0 &&
+                           (s64{stats.max_index} + request.base_vertex) * request.vb_stride <
+                               static_cast<s64>(request.vb_bytes);
+        LOG_WARNING(Render_Vulkan,
+                    "Nx2BadMesh retranslate {:#x}: device {:#x} -> {:#x} (vertices {:#x} -> "
+                    "{:#x}), {} stale device pages mapped again, max index now {} for {} bytes "
+                    "at stride {}: {}",
+                    request.ib_gpu, ib_before.value_or(0), ib_after.value_or(0),
+                    vb_before.value_or(0), gpu_memory->GpuToCpuAddress(request.vb_gpu).value_or(0),
+                    refreshed, stats.Any() ? s64{stats.max_index} : -1, request.vb_bytes,
+                    request.vb_stride,
+                    valid ? "VALID mesh now (a stale translation was the cause)"
+                          : "still no valid mesh (the memory itself holds other data)");
+        Common::Nx2MapLog::AddBadMesh(fmt::format(
+            R"({{"retranslate":{{"gpu":"{:#x}","device_before":"{:#x}","device_after":"{:#x}","refreshed_pages":{},"max_index":{},"vertex_bytes":{},"vertex_stride":{},"valid":{},"present":{}}}}})",
+            request.ib_gpu, ib_before.value_or(0), ib_after.value_or(0), refreshed,
+            stats.Any() ? s64{stats.max_index} : -1, request.vb_bytes, request.vb_stride, valid,
+            Common::Nx2MapLog::Frame()));
+        // Scanned again at its next draw.
+        bad_mesh_scans.erase(request.ib_gpu);
+    }
+}
+
 void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
     std::array<ImageView*, VideoCommon::NUM_RT> colors{};
     const auto& ids = texture_cache.GetRenderTargets().color_buffer_ids;
@@ -3220,6 +3635,7 @@ void RasterizerVulkan::FrameDumpPass(const Framebuffer* framebuffer) {
 }
 
 void RasterizerVulkan::TickFrame() {
+    ProcessBadMeshRetranslates();
     if (VideoCore::Nx2Debug::HasRequests()) {
         if (auto capture = VideoCore::Nx2Debug::TakeCapture()) {
             frame_dump.Arm(std::move(capture->directory), capture->sampled, capture->buffers,
