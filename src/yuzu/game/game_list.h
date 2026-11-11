@@ -8,6 +8,7 @@
 
 #include <QLabel>
 #include <QLineEdit>
+#include <QHash>
 #include <QList>
 #include <QSet>
 #include <QPushButton>
@@ -202,9 +203,14 @@ private:
     struct ArtworkLookup {
         u64 program_id;
         QString title;
+        bool forced{};
+        /// Only the newest lookup of a program may save its result.
+        u64 serial{};
     };
     QList<ArtworkLookup> artwork_queue;
     QSet<u64> artwork_attempted;
+    QHash<u64, u64> artwork_newest;
+    u64 artwork_serial = 0;
     int artwork_running = 0;
     bool artwork_failure_logged = false;
     std::shared_ptr<std::atomic_bool> artwork_cancel = std::make_shared<std::atomic_bool>(false);

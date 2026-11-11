@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include <filesystem>
 #include <functional>
 #include <utility>
 
@@ -428,11 +429,14 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
             // A forced lookup takes over the waiting one, with the name the game has now.
             if (forced) {
                 queued.title = title.trimmed();
+                queued.forced = true;
             }
             return;
         }
     }
-    artwork_queue.append({program_id, title.trimmed()});
+    const u64 serial = ++artwork_serial;
+    artwork_newest.insert(program_id, serial);
+    artwork_queue.append({program_id, title.trimmed(), forced, serial});
     StartArtworkLookups();
 }
 
@@ -448,7 +452,18 @@ void GameList::StartArtworkLookups() {
             watcher->deleteLater();
             --artwork_running;
             const ArtworkLookupResult result = watcher->result();
-            if (result.status == ArtworkLookupStatus::Found) {
+            // A newer lookup of the same game wins, whichever finishes first.
+            const bool newest = artwork_newest.value(lookup.program_id) == lookup.serial;
+            if (newest) {
+                artwork_newest.remove(lookup.program_id);
+            }
+            // An automatic lookup only fills a game without artwork: artwork the user set while
+            // it ran stays.
+            std::error_code ec;
+            const bool artwork_added =
+                !lookup.forced &&
+                std::filesystem::exists(QtCommon::Game::CustomArtworkPath(lookup.program_id), ec);
+            if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added) {
                 if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
                     LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
                     ShowCustomArtwork(lookup.program_id);
