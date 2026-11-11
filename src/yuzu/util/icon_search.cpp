@@ -541,9 +541,26 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
 } // namespace
 
 ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
-                                             const std::atomic_bool& cancel) {
+                                             const std::atomic_bool& cancel, bool prefer_newest) {
     ArtworkLookupResult out;
-    if (title.empty() || api_key.empty()) {
+    // A trailing "(2026)" is not part of the name SteamGridDB knows; it says which release.
+    std::string search_title = title;
+    int wanted_year = 0;
+    if (const auto open = search_title.rfind('(');
+        open != std::string::npos && open > 0 && search_title.ends_with(')')) {
+        const std::string inner = search_title.substr(open + 1, search_title.size() - open - 2);
+        if (inner.size() == 4 && std::ranges::all_of(inner, [](unsigned char c) {
+                return std::isdigit(c) != 0;
+            })) {
+            wanted_year = std::stoi(inner);
+        }
+        search_title.erase(open);
+        while (!search_title.empty() &&
+               std::isspace(static_cast<unsigned char>(search_title.back()))) {
+            search_title.pop_back();
+        }
+    }
+    if (title.empty() || search_title.empty() || api_key.empty()) {
         out.status = ArtworkLookupStatus::NotFound;
         return out;
     }
@@ -559,18 +576,77 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
         return HttpGet(std::string{SgdbApiBase} + path, deadline, cancel, api_key);
     };
     try {
-        const auto search = sgdb_get("/search/autocomplete/" + UrlEncodePathSegment(title));
+        const auto search =
+            sgdb_get("/search/autocomplete/" + UrlEncodePathSegment(search_title));
         if (search.status != HttpStatus::Ok) {
             return failed(search);
         }
-        // The first autocomplete entry is SteamGridDB's best match.
+        // The first autocomplete entry is SteamGridDB's best match. Entries with the same name
+        // are other releases of it (an original and its remake); the year picks between them.
+        struct Entry {
+            int id{};
+            std::string name;
+            int year{};
+            s64 release{};
+        };
+        std::vector<Entry> entries;
         const auto parsed = nlohmann::json::parse(search.body, nullptr, false);
-        int game_id = 0;
         if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("data") &&
-            parsed["data"].is_array() && !parsed["data"].empty() &&
-            parsed["data"][0].is_object() && parsed["data"][0].contains("id") &&
-            parsed["data"][0]["id"].is_number_integer()) {
-            game_id = parsed["data"][0]["id"].get<int>();
+            parsed["data"].is_array()) {
+            for (const auto& item : parsed["data"]) {
+                if (!item.is_object() || !item.contains("id") || !item["id"].is_number_integer()) {
+                    continue;
+                }
+                Entry entry{.id = item["id"].get<int>()};
+                if (item.contains("name") && item["name"].is_string()) {
+                    entry.name = item["name"].get<std::string>();
+                }
+                if (item.contains("release_date") && item["release_date"].is_number_integer()) {
+                    entry.release = item["release_date"].get<s64>();
+                    // Unix time to a calendar year is close enough for picking a release.
+                    entry.year = 1970 + static_cast<int>(entry.release / 31556952);
+                }
+                entries.push_back(std::move(entry));
+            }
+        }
+        const auto simple_name = [](const std::string& name) {
+            std::string out_name;
+            for (const unsigned char c : name) {
+                if (std::isalnum(c)) {
+                    out_name += static_cast<char>(std::tolower(c));
+                }
+            }
+            return out_name;
+        };
+        int game_id = 0;
+        if (!entries.empty()) {
+            const Entry* chosen = &entries.front();
+            const std::string best_name = simple_name(chosen->name);
+            const Entry* same_name_in_year = nullptr;
+            const Entry* any_in_year = nullptr;
+            if (wanted_year != 0) {
+                for (const auto& entry : entries) {
+                    if (entry.year != wanted_year) {
+                        continue;
+                    }
+                    if (!same_name_in_year && simple_name(entry.name) == best_name) {
+                        same_name_in_year = &entry;
+                    }
+                    if (!any_in_year) {
+                        any_in_year = &entry;
+                    }
+                }
+            }
+            if (same_name_in_year || any_in_year) {
+                chosen = same_name_in_year ? same_name_in_year : any_in_year;
+            } else if (prefer_newest) {
+                for (const auto& entry : entries) {
+                    if (simple_name(entry.name) == best_name && entry.release > chosen->release) {
+                        chosen = &entry;
+                    }
+                }
+            }
+            game_id = chosen->id;
         }
         if (game_id <= 0) {
             out.status = ArtworkLookupStatus::NotFound;

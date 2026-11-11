@@ -468,10 +468,14 @@ void GameList::StartArtworkLookups() {
             }
             StartArtworkLookups();
         });
+        // Switch 2 program IDs start with 04. Their titles are often remakes that share the name
+        // of an older game, so the newest release of that name is the right one.
+        const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
         watcher->setFuture(QtConcurrent::run(
             [title = lookup.title.toStdString(),
-             key = UISettings::values.steamgriddb_api_key.GetValue(), cancel = artwork_cancel] {
-                return LookUpSteamGridDbArtwork(title, key, *cancel);
+             key = UISettings::values.steamgriddb_api_key.GetValue(), cancel = artwork_cancel,
+             prefer_newest] {
+                return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
             }));
     }
 }
