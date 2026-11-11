@@ -479,3 +479,22 @@ TEST_CASE("Texture descriptor pools up to 4 MiB are flushed for translation on w
     CHECK(TexturePoolBytes(0xFFFFFFFF) == (u64{1} << 37));
     CHECK_FALSE(CanFlushTexturePool(0xFFFFFFFF));
 }
+
+TEST_CASE("A texture descriptor pool's last byte is found without wrapping",
+          "[stage_translation]") {
+    using VideoCommon::TexturePoolLastAddress;
+
+    // A 2 MiB pool starting 1 MiB before the end of a 40-bit address space ends past it
+    constexpr u64 space_end = u64{1} << 40;
+    constexpr u32 two_mib_limit = (u32{2} << 20) / 32 - 1;
+    CHECK(TexturePoolLastAddress(space_end - (u64{1} << 20), two_mib_limit) ==
+          space_end + (u64{1} << 20) - 1);
+    CHECK(TexturePoolLastAddress(space_end - (u64{2} << 20), two_mib_limit) == space_end - 1);
+
+    // One descriptor at address 0 ends at byte 31
+    CHECK(TexturePoolLastAddress(0, 0) == 31);
+
+    // The last byte of the 64-bit range is reachable, one past it wraps
+    CHECK(TexturePoolLastAddress(~u64{0} - 31, 0) == ~u64{0});
+    CHECK_FALSE(TexturePoolLastAddress(~u64{0} - 30, 0).has_value());
+}

@@ -2828,13 +2828,17 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     // this thread waits. Only this thread may flush guest memory, as reading a texture descriptor
     // does, so the descriptor pool is flushed here first; with this thread waiting nothing can
     // make it dirty again. A pool too large to flush on every miss translates here as before
-    // (VideoCommon::MaxFlushedTexturePoolBytes).
+    // (VideoCommon::MaxFlushedTexturePoolBytes), as does one running past the GPU address space,
+    // which FlushRegion would skip whole.
     if (std::ranges::count_if(graphics_key.unique_hashes, [](u64 hash) { return hash != 0; }) >=
         2) {
         static_assert(sizeof(Tegra::Texture::TICEntry) == VideoCommon::TextureDescriptorBytes);
         const auto& tex_header = maxwell3d->regs.tex_header;
         const u64 pool_bytes = VideoCommon::TexturePoolBytes(tex_header.limit);
-        if (VideoCommon::CanFlushTexturePool(tex_header.limit)) {
+        const std::optional<u64> pool_last =
+            VideoCommon::TexturePoolLastAddress(tex_header.Address(), tex_header.limit);
+        if (VideoCommon::CanFlushTexturePool(tex_header.limit) && pool_last &&
+            gpu_memory->IsWithinGPUAddressRange(*pool_last)) {
             gpu_memory->FlushRegion(tex_header.Address(), pool_bytes);
             for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
                 if (graphics_key.unique_hashes[index] != 0) {

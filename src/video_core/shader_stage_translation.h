@@ -72,6 +72,18 @@ inline constexpr u64 MaxFlushedTexturePoolBytes = u64{4} << 20;
     return TexturePoolBytes(tic_limit) <= MaxFlushedTexturePoolBytes;
 }
 
+/// Address of the last byte of the pool at `pool_addr` whose last index is `tic_limit`, or none
+/// when it wraps past 2^64. The pool flushes whole only when this is inside the GPU address
+/// space: MemoryManager::FlushRegion does nothing for a range that runs past its end.
+[[nodiscard]] constexpr std::optional<u64> TexturePoolLastAddress(u64 pool_addr,
+                                                                  u32 tic_limit) noexcept {
+    const u64 last_offset = TexturePoolBytes(tic_limit) - 1;
+    if (pool_addr > ~u64{0} - last_offset) {
+        return std::nullopt;
+    }
+    return pool_addr + last_offset;
+}
+
 /// Translates every stage as a NeedNow job of `jobs`, the calling thread running those no worker
 /// took, and returns once all are done. The environments must not be used elsewhere meanwhile.
 void TranslateStages(ShaderJobScheduler& jobs, std::span<StageTranslation> stages,
