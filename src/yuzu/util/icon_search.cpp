@@ -623,23 +623,27 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
         if (!entries.empty()) {
             const Entry* chosen = &entries.front();
             const std::string best_name = simple_name(chosen->name);
+            const std::string searched_name = simple_name(search_title);
+            // The year only picks between releases of the game: an entry of that year with
+            // another name is a different game.
             const Entry* same_name_in_year = nullptr;
-            const Entry* any_in_year = nullptr;
+            const Entry* searched_name_in_year = nullptr;
             if (wanted_year != 0) {
                 for (const auto& entry : entries) {
                     if (entry.year != wanted_year) {
                         continue;
                     }
-                    if (!same_name_in_year && simple_name(entry.name) == best_name) {
+                    const std::string name = simple_name(entry.name);
+                    if (!same_name_in_year && name == best_name) {
                         same_name_in_year = &entry;
                     }
-                    if (!any_in_year) {
-                        any_in_year = &entry;
+                    if (!searched_name_in_year && name == searched_name) {
+                        searched_name_in_year = &entry;
                     }
                 }
             }
-            if (same_name_in_year || any_in_year) {
-                chosen = same_name_in_year ? same_name_in_year : any_in_year;
+            if (same_name_in_year || searched_name_in_year) {
+                chosen = same_name_in_year ? same_name_in_year : searched_name_in_year;
             } else if (prefer_newest) {
                 for (const auto& entry : entries) {
                     if (simple_name(entry.name) == best_name && entry.release > chosen->release) {
