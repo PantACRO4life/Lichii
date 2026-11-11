@@ -553,11 +553,11 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
                 return std::isdigit(c) != 0;
             })) {
             wanted_year = std::stoi(inner);
-        }
-        search_title.erase(open);
-        while (!search_title.empty() &&
-               std::isspace(static_cast<unsigned char>(search_title.back()))) {
-            search_title.pop_back();
+            search_title.erase(open);
+            while (!search_title.empty() &&
+                   std::isspace(static_cast<unsigned char>(search_title.back()))) {
+                search_title.pop_back();
+            }
         }
     }
     if (title.empty() || search_title.empty() || api_key.empty()) {
