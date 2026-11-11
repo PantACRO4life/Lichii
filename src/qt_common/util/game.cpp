@@ -723,10 +723,16 @@ bool SaveCustomArtwork(u64 program_id, const QImage& image) {
     return true;
 }
 
-bool RemoveCustomArtwork(u64 program_id) {
+// True when nothing is left at the path. A path that cannot be checked counts as still there.
+static bool RemoveCustomFile(const std::filesystem::path& path) {
     std::error_code ec;
-    std::filesystem::remove(CustomArtworkPath(program_id), ec);
-    return !std::filesystem::exists(CustomArtworkPath(program_id), ec);
+    std::filesystem::remove(path, ec);
+    const bool exists = std::filesystem::exists(path, ec);
+    return !exists && !ec;
+}
+
+bool RemoveCustomArtwork(u64 program_id) {
+    return RemoveCustomFile(CustomArtworkPath(program_id));
 }
 
 std::filesystem::path CustomTitlePath(u64 program_id) {
@@ -755,9 +761,7 @@ bool SaveCustomTitle(u64 program_id, const std::string& title) {
     const QString name = QString::fromStdString(title).simplified();
     const auto path = CustomTitlePath(program_id);
     if (name.isEmpty()) {
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-        return !std::filesystem::exists(path, ec);
+        return RemoveCustomFile(path);
     }
     const QByteArray bytes = name.toUtf8();
     if (bytes.size() > MaxCustomTitleBytes) {
