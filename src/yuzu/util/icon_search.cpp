@@ -216,9 +216,12 @@ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_
         if (!bearer_token.empty()) {
             headers.emplace("Authorization", "Bearer " + bearer_token);
         }
-        auto res = client.Get(path, headers);
+        // Stops a download in progress as soon as cancel is set, not only at the deadline.
+        auto res = client.Get(path, headers, [&cancel](size_t, size_t) { return !cancel.load(); });
         if (!res) {
-            result.status = res.error() == httplib::Error::Canceled || steady_clock::now() >= deadline
+            result.status = cancel ? HttpStatus::Cancelled
+                            : res.error() == httplib::Error::Canceled ||
+                                    steady_clock::now() >= deadline
                                 ? HttpStatus::Timeout
                                 : HttpStatus::NetworkError;
             result.detail = httplib::to_string(res.error());
