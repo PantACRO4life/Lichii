@@ -21,6 +21,7 @@
 
 #include <QBuffer>
 #include <QByteArray>
+#include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QIcon>
@@ -603,8 +604,8 @@ ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std
                 }
                 if (item.contains("release_date") && item["release_date"].is_number_integer()) {
                     entry.release = item["release_date"].get<s64>();
-                    // Unix time to a calendar year is close enough for picking a release.
-                    entry.year = 1970 + static_cast<int>(entry.release / 31556952);
+                    entry.year =
+                        QDateTime::fromSecsSinceEpoch(entry.release).toUTC().date().year();
                 }
                 entries.push_back(std::move(entry));
             }
