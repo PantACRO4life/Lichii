@@ -451,6 +451,12 @@ void GameList::StartArtworkLookups() {
     while (artwork_running < MaxParallelLookups && !artwork_queue.isEmpty()) {
         ArtworkLookup lookup = artwork_queue.takeFirst();
         lookup.key = UISettings::values.steamgriddb_api_key.GetValue();
+        // A waiting lookup is always the newest one of its game.
+        if (lookup.forced) {
+            artwork_forced.insert(lookup.program_id);
+        } else {
+            artwork_forced.remove(lookup.program_id);
+        }
         ++artwork_running;
         auto* const watcher = new QFutureWatcher<ArtworkLookupResult>(this);
         connect(watcher, &QFutureWatcher<ArtworkLookupResult>::finished, this, [this, watcher,
@@ -462,6 +468,7 @@ void GameList::StartArtworkLookups() {
             const bool newest = artwork_newest.value(lookup.program_id) == lookup.serial;
             if (newest) {
                 artwork_newest.remove(lookup.program_id);
+                artwork_forced.remove(lookup.program_id);
             }
             // An automatic lookup only fills a game without artwork: artwork the user set while
             // it ran stays.
@@ -571,6 +578,33 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
     if (!search_field->filterText().isEmpty()) {
         OnTextChanged(search_field->filterText());
     }
+    // A waiting artwork lookup searches the new name. A running one searched the old name, so
+    // its result is dropped and the new name is looked up instead.
+    const QString search_title = title.trimmed();
+    for (auto& queued : artwork_queue) {
+        if (queued.program_id == program_id) {
+            if (!search_title.isEmpty()) {
+                queued.title = search_title;
+            }
+            return;
+        }
+    }
+    if (!artwork_newest.contains(program_id)) {
+        return;
+    }
+    const bool forced = artwork_forced.contains(program_id);
+    artwork_newest.remove(program_id);
+    artwork_forced.remove(program_id);
+    // An automatic lookup only fills a game that still has no artwork.
+    std::error_code ec;
+    if (search_title.isEmpty() || UISettings::values.steamgriddb_api_key.GetValue().empty() ||
+        (!forced && std::filesystem::exists(QtCommon::Game::CustomArtworkPath(program_id), ec))) {
+        return;
+    }
+    const u64 serial = ++artwork_serial;
+    artwork_newest.insert(program_id, serial);
+    artwork_queue.append({program_id, search_title, forced, serial});
+    StartArtworkLookups();
 }
 
 void GameList::RefreshGameDirectory() {

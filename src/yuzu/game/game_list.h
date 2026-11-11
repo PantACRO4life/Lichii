@@ -212,6 +212,8 @@ private:
     QList<ArtworkLookup> artwork_queue;
     QSet<u64> artwork_attempted;
     QHash<u64, u64> artwork_newest;
+    /// Programs whose running newest lookup was asked for by the user.
+    QSet<u64> artwork_forced;
     u64 artwork_serial = 0;
     /// The API key the attempted games were looked up with.
     std::string artwork_key;
