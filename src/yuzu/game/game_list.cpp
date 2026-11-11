@@ -416,9 +416,14 @@ void GameList::QueueArtworkLookups() {
 }
 
 void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool forced) {
-    if (program_id == 0 || title.trimmed().isEmpty() ||
-        UISettings::values.steamgriddb_api_key.GetValue().empty()) {
+    const std::string& key = UISettings::values.steamgriddb_api_key.GetValue();
+    if (program_id == 0 || title.trimmed().isEmpty() || key.empty()) {
         return;
+    }
+    // A new key gives the games looked up with the old one another try.
+    if (key != artwork_key) {
+        artwork_key = key;
+        artwork_attempted.clear();
     }
     if (!forced && artwork_attempted.contains(program_id)) {
         return;
@@ -444,7 +449,8 @@ void GameList::StartArtworkLookups() {
     // A few at a time keeps SteamGridDB happy and the scan of a large library short.
     constexpr int MaxParallelLookups = 2;
     while (artwork_running < MaxParallelLookups && !artwork_queue.isEmpty()) {
-        const ArtworkLookup lookup = artwork_queue.takeFirst();
+        ArtworkLookup lookup = artwork_queue.takeFirst();
+        lookup.key = UISettings::values.steamgriddb_api_key.GetValue();
         ++artwork_running;
         auto* const watcher = new QFutureWatcher<ArtworkLookupResult>(this);
         connect(watcher, &QFutureWatcher<ArtworkLookupResult>::finished, this, [this, watcher,
@@ -481,8 +487,10 @@ void GameList::StartArtworkLookups() {
                 LOG_INFO(Frontend, "SteamGridDB artwork lookup for {:016X} failed: {} {}",
                          lookup.program_id, reason, result.detail);
             }
-            if (result.status == ArtworkLookupStatus::BadApiKey) {
-                // Every other lookup would fail the same way.
+            if (result.status == ArtworkLookupStatus::BadApiKey &&
+                lookup.key == UISettings::values.steamgriddb_api_key.GetValue()) {
+                // Every other lookup would fail the same way. A late failure with a key that was
+                // replaced since leaves the lookups of the new key alone.
                 artwork_queue.clear();
             }
             StartArtworkLookups();
@@ -491,8 +499,7 @@ void GameList::StartArtworkLookups() {
         // of an older game, so the newest release of that name is the right one.
         const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
         watcher->setFuture(QtConcurrent::run(
-            [title = lookup.title.toStdString(),
-             key = UISettings::values.steamgriddb_api_key.GetValue(), cancel = artwork_cancel,
+            [title = lookup.title.toStdString(), key = lookup.key, cancel = artwork_cancel,
              prefer_newest] {
                 return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
             }));
