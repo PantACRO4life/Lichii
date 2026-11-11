@@ -23,11 +23,14 @@
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QToolButton>
+#include <QFutureWatcher>
 #include <QVariantAnimation>
+#include <QtConcurrent/QtConcurrentRun>
 #include <qlayoutitem.h>
 
 #include "common/common_types.h"
 #include "common/fs/fs_util.h"
+#include "common/logging.h"
 #include "core/core.h"
 #include "core/file_sys/nup_writer.h"
 #ifdef LICHII_NX_TOOLS
@@ -48,6 +51,7 @@
 #include "yuzu/main_window.h"
 #include "yuzu/shader_warm_dialog.h"
 #include "yuzu/util/controller_navigation.h"
+#include "yuzu/util/icon_search.h"
 #include "yuzu/util/util.h"
 
 GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvider* provider_,
@@ -119,6 +123,8 @@ void GameList::SetNxToolRunning(bool running) {
 }
 
 GameList::~GameList() {
+    // Running lookups see the flag and stop; their results are dropped with this widget.
+    artwork_cancel->store(true);
     UnloadController();
 }
 
@@ -366,6 +372,131 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     }
 
     emit PopulatingCompleted();
+    QueueArtworkLookups();
+}
+
+QString GameList::GameTitle(u64 program_id) const {
+    QString title;
+    const std::function<void(const QStandardItem*)> visit = [&](const QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount() && title.isEmpty(); ++row) {
+            const QStandardItem* item = parent->child(row);
+            if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                    GameListItemType::Game &&
+                item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
+                title = item->data(GameListItemPath::TitleRole).toString();
+            }
+            visit(item);
+        }
+    };
+    visit(item_model->invisibleRootItem());
+    return title;
+}
+
+void GameList::QueueArtworkLookups() {
+    if (UISettings::values.steamgriddb_api_key.GetValue().empty()) {
+        return;
+    }
+    const std::function<void(const QStandardItem*)> visit = [&](const QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount(); ++row) {
+            const QStandardItem* item = parent->child(row);
+            if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                GameListItemType::Game) {
+                // Games with an icon in the file or custom artwork already have a picture.
+                if (!item->data(GameListItemPath::HasIconRole).toBool()) {
+                    QueueArtworkLookup(item->data(GameListItemPath::ProgramIdRole).toULongLong(),
+                                       item->data(GameListItemPath::TitleRole).toString(), false);
+                }
+            } else {
+                visit(item);
+            }
+        }
+    };
+    visit(item_model->invisibleRootItem());
+}
+
+void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool forced) {
+    if (program_id == 0 || title.trimmed().isEmpty() ||
+        UISettings::values.steamgriddb_api_key.GetValue().empty()) {
+        return;
+    }
+    if (!forced && artwork_attempted.contains(program_id)) {
+        return;
+    }
+    artwork_attempted.insert(program_id);
+    for (const auto& queued : artwork_queue) {
+        if (queued.program_id == program_id) {
+            return;
+        }
+    }
+    artwork_queue.append({program_id, title.trimmed()});
+    StartArtworkLookups();
+}
+
+void GameList::StartArtworkLookups() {
+    // A few at a time keeps SteamGridDB happy and the scan of a large library short.
+    constexpr int MaxParallelLookups = 2;
+    while (artwork_running < MaxParallelLookups && !artwork_queue.isEmpty()) {
+        const ArtworkLookup lookup = artwork_queue.takeFirst();
+        ++artwork_running;
+        auto* const watcher = new QFutureWatcher<ArtworkLookupResult>(this);
+        connect(watcher, &QFutureWatcher<ArtworkLookupResult>::finished, this, [this, watcher,
+                                                                                 lookup] {
+            watcher->deleteLater();
+            --artwork_running;
+            const ArtworkLookupResult result = watcher->result();
+            if (result.status == ArtworkLookupStatus::Found) {
+                if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
+                    LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
+                    ShowCustomArtwork(lookup.program_id);
+                }
+            } else if (result.status != ArtworkLookupStatus::Cancelled &&
+                       !artwork_failure_logged) {
+                // Logged once per session. The key itself is never logged.
+                artwork_failure_logged = true;
+                const char* reason = "it could not be reached";
+                if (result.status == ArtworkLookupStatus::BadApiKey) {
+                    reason = "the API key was rejected";
+                } else if (result.status == ArtworkLookupStatus::NotFound) {
+                    reason = "no match was found";
+                }
+                LOG_INFO(Frontend, "SteamGridDB artwork lookup for {:016X} failed: {} {}",
+                         lookup.program_id, reason, result.detail);
+            }
+            if (result.status == ArtworkLookupStatus::BadApiKey) {
+                // Every other lookup would fail the same way.
+                artwork_queue.clear();
+            }
+            StartArtworkLookups();
+        });
+        watcher->setFuture(QtConcurrent::run(
+            [title = lookup.title.toStdString(),
+             key = UISettings::values.steamgriddb_api_key.GetValue(), cancel = artwork_cancel] {
+                return LookUpSteamGridDbArtwork(title, key, *cancel);
+            }));
+    }
+}
+
+void GameList::ShowCustomArtwork(u64 program_id) {
+    // Updates the shown pictures in place. A rescan here would stop and wait for a scan that is
+    // still running on the UI thread, and rebuild the whole library for one picture.
+    const std::vector<u8> artwork = QtCommon::Game::ReadCustomArtwork(program_id);
+    if (artwork.empty()) {
+        return;
+    }
+    const std::function<void(QStandardItem*)> visit = [&](QStandardItem* parent) {
+        for (int row = 0; row < parent->rowCount(); ++row) {
+            QStandardItem* item = parent->child(row);
+            if (item->data(GameListItem::TypeRole).value<GameListItemType>() ==
+                GameListItemType::Game) {
+                if (item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
+                    GameListItemPath::SetPicture(item, artwork);
+                }
+            } else {
+                visit(item);
+            }
+        }
+    };
+    visit(item_model->invisibleRootItem());
 }
 
 void GameList::SetGameTitle(u64 program_id, const QString& title) {
@@ -590,6 +721,9 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
         edit_nup = context_menu.addAction(tr("Edit NUP Metadata..."));
         edit_nup->setEnabled(!nup_conversion_running);
     }
+    QAction* lookup_artwork = context_menu.addAction(tr("Look up artwork on SteamGridDB"));
+    lookup_artwork->setVisible(program_id != 0);
+    lookup_artwork->setEnabled(!UISettings::values.steamgriddb_api_key.GetValue().empty());
     QAction* properties = context_menu.addAction(tr("Configure Game"));
     if (program_id != 0 && program_id == reportable_program_id) {
         auto* report = context_menu.addAction(tr("Submit compatibility report…"));
@@ -738,6 +872,9 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
 #endif
     connect(properties, &QAction::triggered, this,
             [this, path]() { emit OpenPerGameGeneralRequested(path); });
+    connect(lookup_artwork, &QAction::triggered, this, [this, program_id] {
+        QueueArtworkLookup(program_id, GameTitle(program_id), true);
+    });
 
     connect(ryujinx, &QAction::triggered, this,
             [this, program_id]() { emit LinkToRyujinxRequested(program_id); });

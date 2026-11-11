@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <QFutureWatcher>
+#include <QImage>
 #include <QObject>
 #include <QString>
 
@@ -35,6 +36,20 @@ struct IconSearchResult {
     std::string resolved_title;
     std::string error;
 };
+
+enum class ArtworkLookupStatus { Found, NotFound, BadApiKey, NetworkError, Cancelled };
+
+struct ArtworkLookupResult {
+    ArtworkLookupStatus status{ArtworkLookupStatus::NotFound};
+    QImage image;
+    std::string detail; // Never contains the API key.
+};
+
+// Finds square artwork for a game title on SteamGridDB with the user's API key: the best title
+// match, then its first 512x512 or 1024x1024 grid, else its first icon. Blocking, so run it off
+// the UI thread; it stops within 30 seconds or as soon as cancel is set.
+ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
+                                             const std::atomic_bool& cancel);
 
 // Looks an icon up by game name on switchiconshowdown.com, falling back to SteamGridDB when the
 // user has set an API key. The search runs in the background under one 10 second deadline; errors,

@@ -9,11 +9,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QList>
+#include <QSet>
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QString>
 #include <QVBoxLayout>
 #include <QVector>
+#include <atomic>
+#include <memory>
 #include <QWidget>
 
 #include "common/common_types.h"
@@ -156,6 +159,15 @@ private:
 
     void RetranslateUI();
 
+    /// Queues a SteamGridDB lookup for every game without artwork, once per game per session.
+    void QueueArtworkLookups();
+    /// Queues one game; forced lookups run again and replace existing custom artwork.
+    void QueueArtworkLookup(u64 program_id, const QString& title, bool forced);
+    void StartArtworkLookups();
+    /// Shows the program's custom artwork in every library entry of it, without a rescan.
+    void ShowCustomArtwork(u64 program_id);
+    QString GameTitle(u64 program_id) const;
+
     friend class GameListSearchField;
 
     std::shared_ptr<FileSys::VfsFilesystem> vfs;
@@ -186,6 +198,16 @@ private:
     bool nx_tool_running{};
     u64 reportable_program_id{};
     QAbstractItemView* m_currentView = nullptr;
+
+    struct ArtworkLookup {
+        u64 program_id;
+        QString title;
+    };
+    QList<ArtworkLookup> artwork_queue;
+    QSet<u64> artwork_attempted;
+    int artwork_running = 0;
+    bool artwork_failure_logged = false;
+    std::shared_ptr<std::atomic_bool> artwork_cancel = std::make_shared<std::atomic_bool>(false);
 };
 
 class GameListPlaceholder : public QWidget {

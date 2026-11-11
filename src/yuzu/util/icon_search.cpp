@@ -540,6 +540,73 @@ IconSearchResult RunIconSearch(const std::string& raw_query, u64 tid, const std:
 
 } // namespace
 
+ArtworkLookupResult LookUpSteamGridDbArtwork(const std::string& title, const std::string& api_key,
+                                             const std::atomic_bool& cancel) {
+    ArtworkLookupResult out;
+    if (title.empty() || api_key.empty()) {
+        out.status = ArtworkLookupStatus::NotFound;
+        return out;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{30};
+    const auto failed = [&out](const HttpResult& res) {
+        out.status = res.status == HttpStatus::Unauthorized ? ArtworkLookupStatus::BadApiKey
+                     : res.status == HttpStatus::Cancelled  ? ArtworkLookupStatus::Cancelled
+                                                            : ArtworkLookupStatus::NetworkError;
+        out.detail = res.detail;
+        return out;
+    };
+    const auto sgdb_get = [&](const std::string& path) {
+        return HttpGet(std::string{SgdbApiBase} + path, deadline, cancel, api_key);
+    };
+    try {
+        const auto search = sgdb_get("/search/autocomplete/" + UrlEncodePathSegment(title));
+        if (search.status != HttpStatus::Ok) {
+            return failed(search);
+        }
+        // The first autocomplete entry is SteamGridDB's best match.
+        const auto parsed = nlohmann::json::parse(search.body, nullptr, false);
+        int game_id = 0;
+        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("data") &&
+            parsed["data"].is_array() && !parsed["data"].empty() &&
+            parsed["data"][0].is_object() && parsed["data"][0].contains("id") &&
+            parsed["data"][0]["id"].is_number_integer()) {
+            game_id = parsed["data"][0]["id"].get<int>();
+        }
+        if (game_id <= 0) {
+            out.status = ArtworkLookupStatus::NotFound;
+            return out;
+        }
+        // Square grids first, then icons.
+        for (const auto& list_path :
+             {fmt::format("/grids/game/{}?dimensions=512x512,1024x1024", game_id),
+              fmt::format("/icons/game/{}", game_id)}) {
+            const auto list = sgdb_get(list_path);
+            if (list.status != HttpStatus::Ok) {
+                return failed(list);
+            }
+            for (const auto& url : ParseSgdbIconUrls(list.body)) {
+                const auto image = HttpGet(url, deadline, cancel);
+                if (image.status == HttpStatus::Cancelled || image.status == HttpStatus::Timeout) {
+                    return failed(image);
+                }
+                QImage decoded;
+                if (image.status == HttpStatus::Ok &&
+                    decoded.loadFromData(reinterpret_cast<const uchar*>(image.body.data()),
+                                         static_cast<int>(image.body.size()))) {
+                    out.status = ArtworkLookupStatus::Found;
+                    out.image = std::move(decoded);
+                    return out;
+                }
+            }
+        }
+        out.status = ArtworkLookupStatus::NotFound;
+    } catch (const std::exception& e) {
+        out.status = ArtworkLookupStatus::NetworkError;
+        out.detail = e.what();
+    }
+    return out;
+}
+
 IconSearch::IconSearch(QWidget* parent) : QObject(parent), parent_widget{parent} {
     connect(&watcher, &QFutureWatcher<IconSearchResult>::finished, this, &IconSearch::OnFinished);
 }
