@@ -86,6 +86,8 @@ private:
     void UpdateIconPreview(const QPixmap& map);
     void OnUploadNupIcon();
     void OnDetectNupIcon();
+    void OnRemoveCustomIcon();
+    void UpdateRemoveIconButton();
     bool SaveCustomMetadata(bool show_error = false);
 
     struct DetectIconResult {
@@ -104,6 +106,11 @@ private:
     std::optional<QString> renamed_title;
     std::vector<u8> pending_nup_icon;
     bool nup_icon_modified{false};
+    /// The game's own icon, shown again when the custom artwork is removed.
+    QPixmap file_icon;
+    bool has_custom_icon{false};
+    /// The saved custom artwork is deleted on Apply or OK.
+    bool remove_custom_icon{false};
     QFutureWatcher<DetectIconResult> detect_watcher;
     std::shared_ptr<std::atomic_bool> detect_cancel;
 

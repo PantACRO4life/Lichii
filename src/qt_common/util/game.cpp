@@ -734,13 +734,15 @@ std::filesystem::path CustomTitlePath(u64 program_id) {
            fmt::format("{:016X}.txt", program_id);
 }
 
+// Larger name files are ignored when read, so a longer name is never saved.
+constexpr qint64 MaxCustomTitleBytes = 4096;
+
 std::string ReadCustomTitle(u64 program_id) {
     if (program_id == 0) {
         return {};
     }
-    constexpr qint64 MaxTitleBytes = 4096;
     QFile file(QString::fromStdString(Common::FS::PathToUTF8String(CustomTitlePath(program_id))));
-    if (!file.open(QIODevice::ReadOnly) || file.size() > MaxTitleBytes) {
+    if (!file.open(QIODevice::ReadOnly) || file.size() > MaxCustomTitleBytes) {
         return {};
     }
     return QString::fromUtf8(file.readAll()).simplified().toStdString();
@@ -757,12 +759,17 @@ bool SaveCustomTitle(u64 program_id, const std::string& title) {
         std::filesystem::remove(path, ec);
         return !std::filesystem::exists(path, ec);
     }
+    const QByteArray bytes = name.toUtf8();
+    if (bytes.size() > MaxCustomTitleBytes) {
+        LOG_ERROR(Frontend, "The custom name for {:016X} is too long", program_id);
+        return false;
+    }
     if (!Common::FS::CreateDirs(path.parent_path())) {
         LOG_ERROR(Frontend, "Cannot create the custom name folder");
         return false;
     }
     QSaveFile file(QString::fromStdString(Common::FS::PathToUTF8String(path)));
-    if (!file.open(QIODevice::WriteOnly) || file.write(name.toUtf8()) < 0 || !file.commit()) {
+    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) < 0 || !file.commit()) {
         LOG_ERROR(Frontend, "Cannot write the custom name for {:016X}", program_id);
         return false;
     }

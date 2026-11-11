@@ -438,6 +438,10 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
             &ConfigurePerGame::OnUploadNupIcon);
     connect(ui->button_detect_icon, &QPushButton::clicked, this,
             &ConfigurePerGame::OnDetectNupIcon);
+    ui->button_remove_icon->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear")));
+    ui->button_remove_icon->setEnabled(false);
+    connect(ui->button_remove_icon, &QPushButton::clicked, this,
+            &ConfigurePerGame::OnRemoveCustomIcon);
     connect(&detect_watcher, &QFutureWatcher<DetectIconResult>::finished, this, [this] {
         if (!detect_cancel || detect_cancel->load()) {
             return;
@@ -453,6 +457,7 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         }
         const auto out = detect_watcher.result();
         if (out.icon_bytes.empty()) {
+            UpdateRemoveIconButton();
             QMessageBox::information(this, tr("Detect Icon"), QString::fromStdString(out.error));
             return;
         }
@@ -465,6 +470,8 @@ ConfigurePerGame::ConfigurePerGame(QWidget* parent, u64 title_id_, const std::st
         }
         pending_nup_icon = out.icon_bytes;
         nup_icon_modified = true;
+        remove_custom_icon = false;
+        UpdateRemoveIconButton();
     });
 
     if (system.IsPoweredOn()) {
@@ -603,28 +610,25 @@ void ConfigurePerGame::LoadConfiguration() {
     initial_title = ui->display_name->text().simplified().toStdString();
     nup_icon_modified = false;
     pending_nup_icon.clear();
+    remove_custom_icon = false;
 
-    scene->clear();
-    if (const auto custom = QtCommon::Game::ReadCustomArtwork(title_id); !custom.empty()) {
-        QPixmap map;
-        if (map.loadFromData(custom.data(), static_cast<u32>(custom.size()))) {
-            UpdateIconPreview(map);
-        }
-    } else if (!is_nup_file && control.second != nullptr) {
-        QPixmap map;
+    file_icon = QPixmap{};
+    if (!is_nup_file && control.second != nullptr) {
         const auto bytes = control.second->ReadAllBytes();
-        if (map.loadFromData(bytes.data(), static_cast<u32>(bytes.size()))) {
-            UpdateIconPreview(map);
-        }
+        file_icon.loadFromData(bytes.data(), static_cast<u32>(bytes.size()));
     } else if (loader != nullptr) {
         std::vector<u8> bytes;
         if (loader->ReadIcon(bytes) == Loader::ResultStatus::Success) {
-            QPixmap map;
-            if (map.loadFromData(bytes.data(), static_cast<u32>(bytes.size()))) {
-                UpdateIconPreview(map);
-            }
+            file_icon.loadFromData(bytes.data(), static_cast<u32>(bytes.size()));
         }
     }
+    QPixmap custom_icon;
+    if (const auto custom = QtCommon::Game::ReadCustomArtwork(title_id); !custom.empty()) {
+        custom_icon.loadFromData(custom.data(), static_cast<u32>(custom.size()));
+    }
+    has_custom_icon = !custom_icon.isNull();
+    UpdateIconPreview(has_custom_icon ? custom_icon : file_icon);
+    UpdateRemoveIconButton();
 
     ui->display_filename->setText(QString::fromStdString(file->GetName()));
 
@@ -676,6 +680,25 @@ void ConfigurePerGame::OnUploadNupIcon() {
         UpdateIconPreview(map);
     }
     nup_icon_modified = true;
+    remove_custom_icon = false;
+    UpdateRemoveIconButton();
+}
+
+void ConfigurePerGame::OnRemoveCustomIcon() {
+    if (title_id == 0 || detect_watcher.isRunning()) {
+        return;
+    }
+    // Drops a picked image that is not saved yet, and the saved artwork on Apply or OK.
+    pending_nup_icon.clear();
+    nup_icon_modified = false;
+    remove_custom_icon = has_custom_icon;
+    UpdateIconPreview(file_icon);
+    UpdateRemoveIconButton();
+}
+
+void ConfigurePerGame::UpdateRemoveIconButton() {
+    ui->button_remove_icon->setEnabled(nup_icon_modified ||
+                                       (has_custom_icon && !remove_custom_icon));
 }
 
 void ConfigurePerGame::OnDetectNupIcon() {
@@ -702,6 +725,7 @@ void ConfigurePerGame::OnDetectNupIcon() {
     ui->button_detect_icon->setEnabled(false);
     ui->button_detect_icon->setText(tr("Detecting..."));
     ui->button_upload_icon->setEnabled(false);
+    ui->button_remove_icon->setEnabled(false);
     ui->display_name->setEnabled(false);
     ui->allow_online_detection->setEnabled(false);
     ui->buttonBox->button(QDialogButtonBox::Ok)->setEnabled(false);
@@ -898,6 +922,19 @@ void ConfigurePerGame::OnDetectNupIcon() {
 }
 
 bool ConfigurePerGame::SaveCustomMetadata(bool show_error) {
+    if (remove_custom_icon) {
+        if (!QtCommon::Game::RemoveCustomArtwork(title_id)) {
+            if (show_error) {
+                QMessageBox::warning(this, tr("Game Artwork"),
+                                     tr("The artwork could not be removed."));
+            }
+            return false;
+        }
+        remove_custom_icon = false;
+        has_custom_icon = false;
+        UpdateRemoveIconButton();
+        UISettings::values.is_game_list_reload_pending.exchange(true);
+    }
     if (nup_icon_modified) {
         // Saved as the game's custom artwork: rewriting the whole archive to embed it took a full
         // copy of the game on the UI thread (25 GB for some NUPs) and failed when the game file
@@ -913,6 +950,8 @@ bool ConfigurePerGame::SaveCustomMetadata(bool show_error) {
         }
         nup_icon_modified = false;
         pending_nup_icon.clear();
+        has_custom_icon = true;
+        UpdateRemoveIconButton();
         UISettings::values.is_game_list_reload_pending.exchange(true);
     }
     const std::string new_title = ui->display_name->text().simplified().toStdString();
