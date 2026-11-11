@@ -423,8 +423,12 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
         return;
     }
     artwork_attempted.insert(program_id);
-    for (const auto& queued : artwork_queue) {
+    for (auto& queued : artwork_queue) {
         if (queued.program_id == program_id) {
+            // A forced lookup takes over the waiting one, with the name the game has now.
+            if (forced) {
+                queued.title = title.trimmed();
+            }
             return;
         }
     }
