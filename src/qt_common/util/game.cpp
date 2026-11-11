@@ -727,8 +727,8 @@ bool SaveCustomArtwork(u64 program_id, const QImage& image) {
 static bool RemoveCustomFile(const std::filesystem::path& path) {
     std::error_code ec;
     std::filesystem::remove(path, ec);
-    const bool exists = std::filesystem::exists(path, ec);
-    return !exists && !ec;
+    const bool still_there = std::filesystem::exists(path, ec);
+    return !still_there && !ec;
 }
 
 bool RemoveCustomArtwork(u64 program_id) {

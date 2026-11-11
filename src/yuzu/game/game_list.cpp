@@ -545,7 +545,8 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
                 GameListItemType::Game) {
                 if (item->data(GameListItemPath::ProgramIdRole).toULongLong() == program_id) {
                     item->setData(title, GameListItemPath::TitleRole);
-                    if (dynamic_cast<GameListItemPath*>(item) == nullptr) {
+                    // A copy is a plain item: only library entries report the game type.
+                    if (item->type() != static_cast<int>(GameListItemType::Game)) {
                         copies.append(item);
                     } else if (!display.isValid()) {
                         display = item->data(Qt::DisplayRole);
