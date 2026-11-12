@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include <QBuffer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -36,6 +37,7 @@
 #include "qt_common/config/uisettings.h"
 #include "qt_common/qt_common.h"
 
+#include "qt_common/game_list/fake_games.h"
 #include "qt_common/game_list/game_list_p.h"
 
 #include "qt_common/game_list/model.h"
@@ -298,6 +300,173 @@ QList<QStandardItem*> MakeGameListEntry(const std::string& path, const std::stri
         new GameListItem(patch_versions),
     };
 }
+
+// Test hook helpers (LICHII_FAKE_GAMES).
+
+/// Small deterministic generator so the fake library is the same on every launch.
+struct FakeRandom {
+    u64 state;
+    explicit FakeRandom(u64 seed) : state{seed * 0x9E3779B97F4A7C15ULL + 1} {}
+    u32 Next() {
+        state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+        return static_cast<u32>(state >> 33);
+    }
+    int Range(int min, int max) {
+        return min + static_cast<int>(Next() % static_cast<u32>(max - min + 1));
+    }
+};
+
+QString FakeTitle(int index, FakeRandom& rng) {
+    // A few fixed titles first so the edge cases are always present.
+    static const QStringList fixed{
+        QStringLiteral("Zap"),
+        QStringLiteral("Pokémon Crystal Meadows"),
+        QStringLiteral("The Legend of the Endless Lighthouse and the Seven Forgotten Kingdoms of Dawn"),
+        QStringLiteral("Ōkami Tales"),
+        QStringLiteral("ゼルダの伝説 風のタクト"),
+        QStringLiteral("Café Rush: Crème Brûlée Édition"),
+        QStringLiteral("X"),
+        QStringLiteral("Super Ultra Mega Hyper Turbo Racing Championship Deluxe Remastered HD Collection"),
+        QStringLiteral("Mario & Friends"),
+        QStringLiteral("Señor Piñata's Fiesta"),
+    };
+    if (index < fixed.size()) {
+        return fixed[index];
+    }
+    static const QStringList first{
+        QStringLiteral("Super"),    QStringLiteral("Hyper"),   QStringLiteral("Mega"),
+        QStringLiteral("Tiny"),     QStringLiteral("Crystal"), QStringLiteral("Shadow"),
+        QStringLiteral("Pokémon"),  QStringLiteral("Neon"),    QStringLiteral("Star"),
+        QStringLiteral("Iron"),     QStringLiteral("Lost"),    QStringLiteral("Cosmic"),
+        QStringLiteral("Pixel"),    QStringLiteral("Wild"),    QStringLiteral("Ancient"),
+        QStringLiteral("Café"),     QStringLiteral("Dragon"),  QStringLiteral("Silent"),
+    };
+    static const QStringList second{
+        QStringLiteral("Kart"),     QStringLiteral("Quest"),      QStringLiteral("Legends"),
+        QStringLiteral("Island"),   QStringLiteral("Racer"),      QStringLiteral("Odyssey"),
+        QStringLiteral("Tactics"),  QStringLiteral("Party"),      QStringLiteral("Dungeon"),
+        QStringLiteral("Frontier"), QStringLiteral("Chronicles"), QStringLiteral("Arena"),
+        QStringLiteral("Garden"),   QStringLiteral("Saga"),       QStringLiteral("Drift"),
+    };
+    static const QStringList suffix{
+        QString{},
+        QString{},
+        QString{},
+        QStringLiteral(" 2"),
+        QStringLiteral(" III"),
+        QStringLiteral(" Deluxe"),
+        QStringLiteral(": Director's Cut"),
+        QStringLiteral(", Definitive Edition"),
+        QStringLiteral(": Return of the Long Forgotten Guardians of the Northern Realm"),
+        QStringLiteral(" ★ Anniversary"),
+    };
+    QString title = QStringLiteral("%1 %2%3")
+                        .arg(first[rng.Range(0, int(first.size()) - 1)],
+                             second[rng.Range(0, int(second.size()) - 1)],
+                             suffix[rng.Range(0, int(suffix.size()) - 1)]);
+    // Keep titles distinct without making every one look numbered.
+    if (index % 7 == 0) {
+        title += QStringLiteral(" #%1").arg(index);
+    }
+    return title;
+}
+
+QString FakeInitials(const QString& title) {
+    QString initials;
+    for (const QString& word : title.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+        if (word.at(0).isLetterOrNumber()) {
+            initials.append(word.at(0).toUpper());
+        }
+        if (initials.size() == 2) {
+            break;
+        }
+    }
+    return initials.isEmpty() ? QStringLiteral("?") : initials;
+}
+
+/// Paints 256x256 cover art (hue gradient, shapes and initials) and returns it as PNG bytes.
+std::vector<u8> FakeCover(const QString& title, int hue) {
+    constexpr int side = 256;
+    QImage image(side, side, QImage::Format_ARGB32_Premultiplied);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QLinearGradient gradient(0, 0, side, side);
+    gradient.setColorAt(0.0, QColor::fromHsl(hue, 200, 150));
+    gradient.setColorAt(1.0, QColor::fromHsl((hue + 70) % 360, 170, 60));
+    painter.fillRect(image.rect(), gradient);
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(255, 255, 255, 40));
+    painter.drawEllipse(QPointF(side * 0.78, side * 0.22), side * 0.34, side * 0.34);
+    painter.setBrush(QColor(0, 0, 0, 45));
+    painter.drawEllipse(QPointF(side * 0.15, side * 0.92), side * 0.42, side * 0.42);
+
+    QFont font;
+    font.setBold(true);
+    font.setPixelSize(side * 2 / 5);
+    painter.setFont(font);
+    const QString initials = FakeInitials(title);
+    painter.setPen(QColor(0, 0, 0, 90));
+    painter.drawText(image.rect().translated(4, 5), Qt::AlignCenter, initials);
+    painter.setPen(Qt::white);
+    painter.drawText(image.rect(), Qt::AlignCenter, initials);
+    painter.end();
+
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    image.save(&buffer, "PNG");
+    return std::vector<u8>(bytes.cbegin(), bytes.cend());
+}
+
+QList<QStandardItem*> MakeFakeEntry(int index, const QString& folder) {
+    FakeRandom rng{static_cast<u64>(index) + 1};
+    const QString title = FakeTitle(index, rng);
+
+    static const std::array<const char*, 3> types{"NSP", "XCI", "NUP"};
+    const QString type = QString::fromLatin1(types[index % types.size()]);
+
+    QString file_name = title;
+    file_name.replace(QRegularExpression(QStringLiteral(R"([\\/:*?"<>|])")), QStringLiteral("_"));
+    const QString path = QStringLiteral("%1%2/%3.%4")
+                             .arg(FakeGames::PathPrefix(), folder, file_name, type.toLower());
+
+    const u64 program_id = FakeGames::IdFor(index);
+    // Half the games get cover art, the other half show the placeholder.
+    const bool with_art = (index % 2) == 0;
+    const std::vector<u8> icon =
+        with_art ? FakeCover(title, (index * 37) % 360) : std::vector<u8>{};
+
+    // 0 to 150 hours, about a quarter never played.
+    const u64 play_time =
+        rng.Range(0, 3) == 0 ? 0 : static_cast<u64>(rng.Range(60, 150 * 3600));
+
+    QString patch_versions;
+    if (rng.Range(0, 2) != 0) {
+        patch_versions = QStringLiteral("Update (%1.%2.%3)")
+                             .arg(rng.Range(1, 3))
+                             .arg(rng.Range(0, 9))
+                             .arg(rng.Range(0, 5));
+    }
+    if (rng.Range(0, 4) == 0) {
+        if (!patch_versions.isEmpty()) {
+            patch_versions += QLatin1Char('\n');
+        }
+        patch_versions += QStringLiteral("DLC");
+    }
+
+    const qulonglong size = static_cast<qulonglong>(rng.Range(200, 16000)) * 1024 * 1024;
+
+    QList<QStandardItem*> entry{
+        new GameListItemPath(path, icon, title, type, program_id, play_time, patch_versions),
+        new GameListItem(type),
+        new GameListItemSize(size),
+        new GameListItemPlayTime(play_time),
+        new GameListItem(patch_versions),
+    };
+    entry[0]->setData(true, FakeGames::FakeEntryRole);
+    return entry;
+}
 } // Anonymous namespace
 
 GameListWorker::GameListWorker(FileSys::VirtualFilesystem vfs_,
@@ -543,6 +712,45 @@ void GameListWorker::ScanFileSystem(ScanTarget target, const std::vector<std::fi
     }
 }
 
+void GameListWorker::AddFakeGames() {
+    const int count = FakeGames::Count();
+    // Three small folders of about 30 games, the rest in one large folder.
+    const int small_size = std::min(30, count / 4);
+    struct FakeFolder {
+        QString name;
+        int games;
+    };
+    const std::array<FakeFolder, 4> folders{{
+        {QStringLiteral("Test Library"), count - small_size * 3},
+        {QStringLiteral("Test Folder A"), small_size},
+        {QStringLiteral("Test Folder Café Ümlaut"), small_size},
+        {QStringLiteral("Test Folder C, with a rather long name to check how titles wrap"),
+         small_size},
+    }};
+
+    int index = 0;
+    for (const FakeFolder& folder : folders) {
+        if (stop_requested) {
+            return;
+        }
+        UISettings::GameDir game_dir{};
+        game_dir.path = QString(FakeGames::PathPrefix() + folder.name).toStdString();
+        auto* dir = new GameListDir(game_dir);
+        dir->setData(QStringLiteral("%1 (%2)").arg(folder.name).arg(folder.games),
+                     Qt::DisplayRole);
+        dir->setData(ThemeIcon("folder"), Qt::DecorationRole);
+        dir->setData(true, FakeGames::FakeEntryRole);
+        auto pending_dir = std::make_shared<std::unique_ptr<GameListDir>>(dir);
+        RecordEvent([=](GameListModel* model) { model->AddDirEntry(pending_dir->release()); });
+
+        for (int i = 0; i < folder.games && !stop_requested; ++i, ++index) {
+            auto pending = std::make_shared<PendingRow>(MakeFakeEntry(index, folder.name));
+            RecordEvent([=](GameListModel* model) { model->AddEntry(pending->Release(), dir); });
+        }
+    }
+    LOG_INFO(Frontend, "Test hook: added {} fake games", index);
+}
+
 void GameListWorker::run() {
     const auto started = std::chrono::steady_clock::now();
     watch_list.clear();
@@ -599,6 +807,10 @@ void GameListWorker::run() {
         } else {
             AddTitlesToGameList(game_list_dir, parent_type);
         }
+    }
+
+    if (FakeGames::Enabled() && !stop_requested) {
+        AddFakeGames();
     }
 
     watch_list.removeDuplicates();

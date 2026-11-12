@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <QFileSystemWatcher>
+#include <QSet>
 #include <QStandardItemModel>
 #include <QStringList>
 #include <QVector>
@@ -56,6 +57,10 @@ public:
     bool IsEmpty() const;
 
     void ToggleFavorite(u64 program_id);
+    /// Favorite state, including the in-memory favorites of the fake games test hook.
+    bool IsFavorite(u64 program_id) const;
+    bool HasFavorites() const;
+    void ClearFakeFavorites();
 
     void RefreshGameDirectory();
     void RefreshExternalContent();
@@ -82,6 +87,8 @@ private:
     void StopWorker();
 
     bool m_flat = false;
+    /// Test hook (LICHII_FAKE_GAMES): favorites of fake games, never saved to the config.
+    QSet<u64> fake_favorites;
     bool scan_enabled = true;
 
     std::shared_ptr<FileSys::VfsFilesystem> vfs;

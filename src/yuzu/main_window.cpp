@@ -117,6 +117,7 @@
 // Qt Common //
 #include "qt_common/config/shared_translation.h"
 #include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/fake_games.h"
 
 #include "qt_common/abstract/frontend.h"
 
@@ -2204,6 +2205,11 @@ bool MainWindow::SelectAndSetCurrentUser(
 
 void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletParameters params,
                           StartGameType type) {
+    // Test hook (LICHII_FAKE_GAMES): fake library entries never boot.
+    if (FakeGames::IsFakePath(filename)) {
+        QMessageBox::information(this, tr("Test entry"), tr("This is a test entry."));
+        return;
+    }
 #ifdef LICHII_NX_TOOLS
     if (nx_metadata_write_in_progress) {
         QMessageBox::information(this, tr("NX Archive"),

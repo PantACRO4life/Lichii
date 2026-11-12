@@ -18,6 +18,7 @@
 #include "qt_common/qt_common.h"
 #include "qt_common/util/game.h"
 
+#include "qt_common/game_list/fake_games.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/game_list/worker.h"
@@ -42,6 +43,14 @@ GameListModel::GameListModel(std::shared_ptr<FileSys::VfsFilesystem> vfs_,
     RetranslateUI();
 
     setSortRole(GameListItemPath::SortRole);
+
+    if (FakeGames::Enabled()) {
+        for (const int index : {0, 1, 4, 9, 23, 57, 140, 333}) {
+            if (index < FakeGames::Count()) {
+                fake_favorites.insert(FakeGames::IdFor(index));
+            }
+        }
+    }
 }
 
 GameListModel::~GameListModel() {
@@ -109,6 +118,9 @@ void GameListModel::DonePopulating(const QStringList& watch_list) {
         for (const auto id : std::as_const(UISettings::values.favorited_ids)) {
             AddFavorite(id);
         }
+        for (const auto id : std::as_const(fake_favorites)) {
+            AddFavorite(id);
+        }
     }
 
     emit PopulatingCompleted(watch_list);
@@ -130,7 +142,30 @@ bool GameListModel::IsEmpty() const {
     return !invisibleRootItem()->hasChildren();
 }
 
+bool GameListModel::IsFavorite(u64 program_id) const {
+    return UISettings::values.favorited_ids.contains(program_id) ||
+           fake_favorites.contains(program_id);
+}
+
+bool GameListModel::HasFavorites() const {
+    return !UISettings::values.favorited_ids.isEmpty() || !fake_favorites.isEmpty();
+}
+
+void GameListModel::ClearFakeFavorites() {
+    fake_favorites.clear();
+}
+
 void GameListModel::ToggleFavorite(u64 program_id) {
+    if (FakeGames::IsFakeId(program_id)) {
+        // Fake games only change the in-memory favorites, the config is not saved.
+        if (fake_favorites.remove(program_id)) {
+            RemoveFavorite(program_id);
+        } else {
+            fake_favorites.insert(program_id);
+            AddFavorite(program_id);
+        }
+        return;
+    }
     if (!UISettings::values.favorited_ids.contains(program_id)) {
         UISettings::values.favorited_ids.append(program_id);
         AddFavorite(program_id);

@@ -78,6 +78,9 @@ private:
 private:
     void AddTitlesToGameList(GameListDir* parent_dir, GameListItemType parent_type);
 
+    /// Test hook (LICHII_FAKE_GAMES): appends synthetic folders and games.
+    void AddFakeGames();
+
     enum class ScanTarget {
         FillManualContentProvider,
         PopulateGameList,

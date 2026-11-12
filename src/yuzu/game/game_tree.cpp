@@ -11,6 +11,7 @@
 #include <QStyledItemDelegate>
 
 #include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/fake_games.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "yuzu/game/common.h"
@@ -96,7 +97,11 @@ public:
             flags | (two_lines ? Qt::AlignBottom : Qt::AlignVCenter), title, &title_rect);
 
         const u64 program_id = index.data(GameListItemPath::ProgramIdRole).toULongLong();
-        if (program_id != 0 && UISettings::values.favorited_ids.contains(program_id)) {
+        const auto* game_model = qobject_cast<const GameListModel*>(index.model());
+        const bool favorite = game_model != nullptr
+                                  ? game_model->IsFavorite(program_id)
+                                  : UISettings::values.favorited_ids.contains(program_id);
+        if (program_id != 0 && favorite) {
             const int star_x = title_rect.right() + 8;
             const int star_y = title_rect.center().y() - 7;
             if (star_x + 14 <= rect.right()) {
@@ -174,6 +179,10 @@ void GameTree::OnItemExpanded(const QModelIndex& item) {
         return;
     }
     const int item_dir_index = item.data(GameListDir::GameDirRole).toInt();
+    // Fake test folders (LICHII_FAKE_GAMES) have no game directory entry.
+    if (item_dir_index < 0 || item_dir_index >= UISettings::values.game_dirs.size()) {
+        return;
+    }
     UISettings::values.game_dirs[item_dir_index].expanded = is_expanded;
 }
 

@@ -22,6 +22,7 @@
 #include <QList>
 #include <QListView>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollBar>
 #include <QScroller>
 #include <QScrollerProperties>
@@ -40,6 +41,7 @@
 #include "core/file_sys/patch_manager.h"
 #include "core/file_sys/registered_cache.h"
 #include "qt_common/config/uisettings.h"
+#include "qt_common/game_list/fake_games.h"
 #include "qt_common/game_list/game_list_p.h"
 #include "qt_common/game_list/model.h"
 #include "qt_common/qt_common.h"
@@ -385,7 +387,7 @@ void GameList::ResetViewMode() {
         if (mode == Settings::GameListMode::TreeView && !m_populating &&
             item_model->rowCount() > 0) {
             tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(),
-                                    UISettings::values.favorited_ids.isEmpty() ||
+                                    !item_model->HasFavorites() ||
                                         !search_field->filterText().isEmpty());
         }
     }
@@ -655,7 +657,7 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
     // favorites row
     if (m_isTreeMode) {
         tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(),
-                                UISettings::values.favorited_ids.isEmpty());
+                                !item_model->HasFavorites());
         tree_view->setExpanded(item_model->invisibleRootItem()->child(0)->index(),
                                UISettings::values.favorites_expanded.GetValue());
     }
@@ -841,6 +843,10 @@ void GameList::ValidateEntry(const QModelIndex& item) {
         break;
     case GameListItemType::Game: {
         const QString file_path = selected.data(GameListItemPath::FullPathRole).toString();
+        if (FakeGames::IsFake(selected) || FakeGames::IsFakePath(file_path)) {
+            QMessageBox::information(this, tr("Test entry"), tr("This is a test entry."));
+            return;
+        }
         if (file_path.isEmpty())
             return;
         const QFileInfo file_info(file_path);
@@ -873,12 +879,12 @@ void GameList::ValidateEntry(const QModelIndex& item) {
 void GameList::ToggleFavorite(u64 program_id) {
     item_model->ToggleFavorite(program_id);
 
-    if (UISettings::values.favorited_ids.contains(program_id)) {
+    if (item_model->IsFavorite(program_id)) {
         tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(),
                                 !search_field->filterText().isEmpty());
         item_model->sort(tree_view->header()->sortIndicatorSection(),
                          tree_view->header()->sortIndicatorOrder());
-    } else if (UISettings::values.favorited_ids.isEmpty()) {
+    } else if (!item_model->HasFavorites()) {
         tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(), true);
     }
 }
@@ -947,6 +953,14 @@ void GameList::PopupContextMenuAt(const QModelIndex& item, const QPoint& global_
 
     const auto selected = item.sibling(item.row(), 0);
     QMenu context_menu;
+    // Test hook: fake folders have no game directory behind them, so no folder actions.
+    if (FakeGames::IsFake(selected) &&
+        selected.data(GameListItem::TypeRole).value<GameListItemType>() !=
+            GameListItemType::Game) {
+        context_menu.addAction(tr("Test folder (no actions)"))->setEnabled(false);
+        context_menu.exec(global_pos);
+        return;
+    }
     switch (selected.data(GameListItem::TypeRole).value<GameListItemType>()) {
     case GameListItemType::Game:
         AddGamePopup(context_menu, selected.data(GameListItemPath::ProgramIdRole).toULongLong(),
@@ -1098,7 +1112,7 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
 
     favorite->setVisible(program_id != 0);
     favorite->setCheckable(true);
-    favorite->setChecked(UISettings::values.favorited_ids.contains(program_id));
+    favorite->setChecked(item_model->IsFavorite(program_id));
     open_save_location->setVisible(program_id != 0);
     open_mod_location->setVisible(program_id != 0);
     open_transferable_shader_cache->setVisible(program_id != 0);
@@ -1212,6 +1226,18 @@ void GameList::AddGamePopup(QMenu& context_menu, u64 program_id, const std::stri
 
     connect(ryujinx, &QAction::triggered, this,
             [this, program_id]() { emit LinkToRyujinxRequested(program_id); });
+
+    // Test hook: a fake game keeps the menu layout, but only Favorite (in memory), Start
+    // (shows a notice) and Copy Title ID stay enabled. Everything that touches files is off.
+    if (FakeGames::IsFakeId(program_id) || FakeGames::IsFakePath(path)) {
+        for (QAction* action : context_menu.actions()) {
+            if (action->isSeparator()) {
+                continue;
+            }
+            action->setEnabled(action == favorite || action == start_game ||
+                               action == start_game_global || action == copy_tid);
+        }
+    }
 };
 
 void GameList::AddCustomDirPopup(QMenu& context_menu, QModelIndex selected) {
@@ -1287,6 +1313,7 @@ void GameList::AddFavoritesPopup(QMenu& context_menu) {
 
     connect(clear, &QAction::triggered, this, [this] {
         UISettings::values.favorited_ids.clear();
+        item_model->ClearFakeFavorites();
         item_model->invisibleRootItem()->child(0)->removeRows(
             0, item_model->invisibleRootItem()->child(0)->rowCount());
         tree_view->setRowHidden(0, item_model->invisibleRootItem()->index(), true);
