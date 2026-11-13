@@ -124,6 +124,38 @@ TEST_CASE("ShaderPrecache: the marker records its version", "[video_core]") {
     REQUIRE_FALSE(ShaderWarm::ReadWarmMarker(warm).has_value());
 }
 
+TEST_CASE("ShaderPrecache: a precache without calls is kept apart from one with calls",
+          "[video_core]") {
+    TempDir dir;
+    const auto warm = dir.path / "warm-compute.bin";
+    WriteBytes(warm, "precache");
+
+    // AMD's Windows driver leaves shared shader functions inlinable.
+    const auto inlined = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, false);
+    const auto calls = ShaderWarm::CurrentWarmStamp(warm, 12, 0x1234, 0x2206, 53, true);
+    REQUIRE(inlined.has_value());
+    REQUIRE(calls.has_value());
+    REQUIRE(inlined->marker_version == ShaderWarm::WarmMarkerVersionInlined);
+    REQUIRE(calls->marker_version == ShaderWarm::WarmMarkerVersion);
+
+    REQUIRE(ShaderWarm::WriteWarmMarker(warm, *inlined));
+    const auto marker = ShaderWarm::ReadWarmMarker(warm);
+    REQUIRE(marker.has_value());
+    REQUIRE(marker->Matches(*inlined));
+    REQUIRE_FALSE(marker->Matches(*calls));
+
+    const auto file = dir.path / "precache-graphics.bin";
+    const ShaderWarm::DriverStamp with_calls{0x1234, 0x2206, 53, true};
+    const ShaderWarm::DriverStamp without_calls{0x1234, 0x2206, 53, false};
+    const std::unordered_set<u64> hashes{7, 8};
+    REQUIRE(ShaderWarm::WritePrecachedPipelines(file, without_calls, hashes));
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, without_calls) == hashes);
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, with_calls).empty());
+    REQUIRE(ShaderWarm::WritePrecachedPipelines(file, with_calls, hashes));
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, with_calls) == hashes);
+    REQUIRE(ShaderWarm::ReadPrecachedPipelines(file, without_calls).empty());
+}
+
 TEST_CASE("ShaderPrecache: precached pipelines are kept per driver", "[video_core]") {
     TempDir dir;
     const auto file = dir.path / "precache-graphics.bin";

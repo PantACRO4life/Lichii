@@ -107,6 +107,10 @@ struct Profile {
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
     bool has_broken_spirv_fragment_shuffle{};
+    /// Keeps large shared functions inlinable instead of marking them DontInline before the
+    /// driver builds them (video_core/spirv_inline_control.h). AMD's Windows driver gains no
+    /// compile time from the calls and runs compute shaders slightly slower with them.
+    bool inline_shared_functions{};
     /// The guest's HMMA.16816.F16 runs on a cooperative matrix, in compute shaders
     bool support_cooperative_hmma{};
     /// Without the above, HMMA runs on 16x16x16 cooperative matrices through shared memory

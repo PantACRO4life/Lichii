@@ -62,10 +62,19 @@ struct WarmStamp {
 /// 4: shared shader functions are built as calls. Markers without this field no longer read.
 /// Test builds stored the calls mode (0 to 3) in this field, so versions start above that range.
 constexpr u32 WarmMarkerVersion = 4;
+/// 5: shared shader functions are left inlinable (AMD's Windows driver), so a precache done
+/// with calls is not taken for one done without them, and the reverse.
+constexpr u32 WarmMarkerVersionInlined = 5;
+
+/// The marker version for SPIR-V built with (`shared_functions_as_calls`) or without calls.
+[[nodiscard]] constexpr u32 WarmMarkerVersionFor(bool shared_functions_as_calls) noexcept {
+    return shared_functions_as_calls ? WarmMarkerVersion : WarmMarkerVersionInlined;
+}
 
 /// The stamp of `warm_file` as it is now, empty when its size or time cannot be read.
 std::optional<WarmStamp> CurrentWarmStamp(const std::filesystem::path& warm_file, u64 entries,
-                                          u32 driver, u32 device_id, u32 cache_version);
+                                          u32 driver, u32 device_id, u32 cache_version,
+                                          bool shared_functions_as_calls = true);
 
 /// The marker of `warm_file`, empty when there is none or it cannot be read.
 std::optional<WarmStamp> ReadWarmMarker(const std::filesystem::path& warm_file);
@@ -96,11 +105,13 @@ bool TakeWarmBeforeStart();
 void RequestSkipWarm();
 bool TakeSkipWarm();
 
-/// The GPU driver, device and pipeline cache version pipelines were precached for.
+/// The GPU driver, device and pipeline cache version pipelines were precached for, and whether
+/// shared shader functions were built as calls (recorded in the list's magic).
 struct DriverStamp {
     u32 driver{};
     u32 device_id{};
     u32 cache_version{};
+    bool shared_functions_as_calls{true};
 
     bool operator==(const DriverStamp&) const = default;
 };
@@ -110,7 +121,8 @@ struct DriverStamp {
 std::filesystem::path PrecachedPipelinesPath(u64 title_id);
 
 /// The pipeline key hashes in `file`, empty when there is none or it was written for another
-/// driver, device or cache version, or before shared shader functions were built as calls.
+/// driver, device or cache version, before shared shader functions were built as calls, or with
+/// calls on while `stamp` has them off (or the reverse).
 std::unordered_set<u64> ReadPrecachedPipelines(const std::filesystem::path& file,
                                                const DriverStamp& stamp);
 

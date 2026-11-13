@@ -423,8 +423,9 @@ std::vector<u32> EmitStageSpirv(const Device& device, const Shader::Profile& pro
     // rebuilds of evicted pipelines from the kept words) is built from these words, so the pass
     // runs once on every path. Functions a stage calls from several places (the global memory
     // functions of native programs) are built as calls instead of being inlined at each call site
-    // (video_core/spirv_inline_control.h).
-    const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(code);
+    // (video_core/spirv_inline_control.h). Not on AMD's Windows driver (inline_shared_functions).
+    const size_t marked =
+        profile.inline_shared_functions ? 0 : VideoCommon::MarkSharedFunctionsDontInline(code);
     if (marked != 0) {
         static std::atomic<u32> logged{};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
@@ -443,9 +444,14 @@ std::vector<u32> EmitStageSpirv(const Device& device, const Shader::Profile& pro
 // (the global memory functions of native programs) are built as calls instead of being inlined at
 // each call site, which made NVIDIA spend 2-13 s on single compute shaders of a test title, every
 // one a freeze at its first dispatch (video_core/spirv_inline_control.h). The translation cache
-// keeps the SPIR-V as emitted, so cached and freshly translated stages are built alike.
-std::vector<u32> ComputeModuleCode(std::span<const u32> code, u64 shader_hash) {
+// keeps the SPIR-V as emitted, so cached and freshly translated stages are built alike. With
+// `inline_shared_functions` (AMD's Windows driver) the words are left as emitted.
+std::vector<u32> ComputeModuleCode(std::span<const u32> code, u64 shader_hash,
+                                   bool inline_shared_functions) {
     std::vector<u32> words(code.begin(), code.end());
+    if (inline_shared_functions) {
+        return words;
+    }
     if (const size_t marked = VideoCommon::MarkSharedFunctionsDontInline(words); marked != 0) {
         static std::atomic<u32> logged{};
         if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
@@ -463,7 +469,8 @@ vk::ShaderModule EmitComputeModule(const Device& device, const Shader::Profile& 
     const std::vector<u32> code{EmitComputeShader(profile, program, shader_hash, reference)};
     device.SaveShader(code);
     // Saved as emitted, built from ComputeModuleCode's words
-    vk::ShaderModule spv_module{BuildShader(device, ComputeModuleCode(code, shader_hash))};
+    vk::ShaderModule spv_module{BuildShader(
+        device, ComputeModuleCode(code, shader_hash, profile.inline_shared_functions))};
 
     // Text log + .spv dump. Same split as the graphics path.
     const bool should_log = GPU::Logging::IsActive();
@@ -674,6 +681,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
             device.GetDriverVersion() < VK_MAKE_VERSION(512, 672, 0),
         .has_broken_spirv_subgroup_shuffle = driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY,
         .has_broken_spirv_fragment_shuffle = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY,
+        .inline_shared_functions = driver_id == VK_DRIVER_ID_AMD_PROPRIETARY,
         .max_subgroup_size = device.GetMaxSubgroupSize(),
         .has_broken_robust =
             device.IsNvidia() && device.GetNvidiaArch() <= NvidiaArchitecture::Arch_Pascal,
@@ -1125,7 +1133,8 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (precache) {
         precached_pipelines = ShaderWarm::ReadPrecachedPipelines(
             ShaderWarm::PrecachedPipelinesPath(title_id),
-            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION});
+            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
+             !profile.inline_shared_functions});
     }
     if (use_vulkan_pipeline_cache) {
         vulkan_pipeline_cache_filename =
@@ -1681,7 +1690,8 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
     const std::string path = Common::FS::PathToUTF8String(warm_file);
     const auto stamp = [&](u64 entries) {
         return ShaderWarm::CurrentWarmStamp(warm_file, entries, device.GetDriverVersion(),
-                                            device.GetDeviceID(), CACHE_VERSION);
+                                            device.GetDeviceID(), CACHE_VERSION,
+                                            !profile.inline_shared_functions);
     };
     // Compute programs of the precache file, unless a matching marker says they were built.
     size_t file_entries = 0;
@@ -1835,7 +1845,9 @@ void PipelineCache::PrecacheShaders(u64 title_id, std::vector<PrecacheJob> jobs,
     if (precached.size() != precached_before) {
         ShaderWarm::WritePrecachedPipelines(
             ShaderWarm::PrecachedPipelinesPath(title_id),
-            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION}, precached);
+            {device.GetDriverVersion(), device.GetDeviceID(), CACHE_VERSION,
+             !profile.inline_shared_functions},
+            precached);
     }
     if (!stop_loading.stop_requested() && total_built != 0) {
         // Without this, the builds reach the file only at the next boot, game change or clean

@@ -46,6 +46,9 @@ constexpr std::string_view StageWriting = "Writing";
 constexpr size_t MaxPendingJobs = 2048;
 // "PGP3": lists written before shared shader functions were built as calls are precached again
 constexpr u32 PrecachedPipelinesMagic = 0x33504750;
+// "PGP4": the same list, written with shared shader functions left inlinable (AMD's Windows
+// driver), so lists built with and without calls are not mixed
+constexpr u32 PrecachedPipelinesInlinedMagic = 0x34504750;
 
 fs::path TitleDir(u64 title_id) {
     return Common::FS::GetEdenPath(Common::FS::EdenPath::ShaderDir) /
@@ -322,7 +325,8 @@ u64 ReadWarmCount(const fs::path& warm_file) {
 }
 
 std::optional<WarmStamp> CurrentWarmStamp(const fs::path& warm_file, u64 entries, u32 driver,
-                                          u32 device_id, u32 cache_version) {
+                                          u32 device_id, u32 cache_version,
+                                          bool shared_functions_as_calls) {
     std::error_code ec;
     const auto size = fs::file_size(warm_file, ec);
     if (ec) {
@@ -335,7 +339,7 @@ std::optional<WarmStamp> CurrentWarmStamp(const fs::path& warm_file, u64 entries
     return WarmStamp{size,      static_cast<s64>(time.time_since_epoch().count()),
                      entries,   driver,
                      device_id, cache_version,
-                     WarmMarkerVersion};
+                     WarmMarkerVersionFor(shared_functions_as_calls)};
 }
 
 std::optional<WarmStamp> ReadWarmMarker(const fs::path& warm_file) {
@@ -391,8 +395,11 @@ std::unordered_set<u64> ReadPrecachedPipelines(const fs::path& file, const Drive
     DriverStamp saved;
     u64 count{};
     if (!in.read(reinterpret_cast<char*>(&magic), sizeof(magic)) ||
-        magic != PrecachedPipelinesMagic ||
-        !in.read(reinterpret_cast<char*>(&saved.driver), sizeof(saved.driver)) ||
+        (magic != PrecachedPipelinesMagic && magic != PrecachedPipelinesInlinedMagic)) {
+        return hashes;
+    }
+    saved.shared_functions_as_calls = magic == PrecachedPipelinesMagic;
+    if (!in.read(reinterpret_cast<char*>(&saved.driver), sizeof(saved.driver)) ||
         !in.read(reinterpret_cast<char*>(&saved.device_id), sizeof(saved.device_id)) ||
         !in.read(reinterpret_cast<char*>(&saved.cache_version), sizeof(saved.cache_version)) ||
         !in.read(reinterpret_cast<char*>(&count), sizeof(count)) || saved != stamp) {
@@ -411,7 +418,8 @@ std::unordered_set<u64> ReadPrecachedPipelines(const fs::path& file, const Drive
 bool WritePrecachedPipelines(const fs::path& file, const DriverStamp& stamp,
                              const std::unordered_set<u64>& hashes) {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    Write(out, PrecachedPipelinesMagic);
+    Write(out, stamp.shared_functions_as_calls ? PrecachedPipelinesMagic
+                                               : PrecachedPipelinesInlinedMagic);
     Write(out, stamp.driver);
     Write(out, stamp.device_id);
     Write(out, stamp.cache_version);
