@@ -99,6 +99,9 @@ public slots:
     void RefreshGameDirectory();
     /// Shows a new name for every library entry of the program, without a rescan.
     void SetGameTitle(u64 program_id, const QString& title);
+    /// The user saved or removed the program's custom artwork: a lookup still running for it
+    /// does not replace that choice.
+    void OnCustomArtworkChanged(u64 program_id);
     void RefreshExternalContent();
     void UpdateIconSizes();
     void OnPopulate();

@@ -614,6 +614,14 @@ void GameList::SetGameTitle(u64 program_id, const QString& title) {
     StartArtworkLookups();
 }
 
+void GameList::OnCustomArtworkChanged(u64 program_id) {
+    // A running lookup's result is dropped and a waiting one is not started.
+    artwork_newest.remove(program_id);
+    artwork_forced.remove(program_id);
+    artwork_queue.removeIf(
+        [program_id](const ArtworkLookup& queued) { return queued.program_id == program_id; });
+}
+
 void GameList::RefreshGameDirectory() {
     item_model->RefreshGameDirectory();
 }
