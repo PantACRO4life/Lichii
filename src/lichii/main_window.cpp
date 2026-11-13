@@ -1606,6 +1606,9 @@ void MainWindow::ConnectWidgetEvents() {
 
     connect(this, &MainWindow::UpdateThemedIcons, multiplayer_state,
             &MultiplayerState::UpdateThemedIcons);
+    connect(this, &MainWindow::UpdateThemedIcons, game_list, &GameList::RefreshThemeIcons);
+    connect(this, &MainWindow::UpdateThemedIcons, game_list_placeholder,
+            &GameListPlaceholder::RefreshThemeIcon);
 }
 
 void MainWindow::ConnectMenuEvents() {

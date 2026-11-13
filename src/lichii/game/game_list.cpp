@@ -388,6 +388,13 @@ void GameList::UpdateIconSizes() {
     }
 }
 
+void GameList::RefreshThemeIcons() {
+    // Folder rows carry their theme icon from the scan; swap it in place instead of scanning again.
+    for (int row = 0; row < item_model->rowCount(); ++row) {
+        RefreshThemeIcon(item_model->item(row, 0));
+    }
+}
+
 void GameList::ValidateEntry(const QModelIndex& item) {
     const auto selected = item.sibling(item.row(), 0);
 
@@ -904,7 +911,7 @@ GameListPlaceholder::GameListPlaceholder(MainWindow* parent) : QWidget{parent} {
     image = new QLabel;
     text = new QLabel;
     layout->setAlignment(Qt::AlignCenter);
-    image->setPixmap(QIcon::fromTheme(QStringLiteral("plus_folder")).pixmap(200));
+    RefreshThemeIcon();
 
     RetranslateUI();
     QFont font = text->font();
@@ -922,6 +929,10 @@ GameListPlaceholder::~GameListPlaceholder() = default;
 
 void GameListPlaceholder::mouseDoubleClickEvent(QMouseEvent* event) {
     emit GameListPlaceholder::AddDirectory();
+}
+
+void GameListPlaceholder::RefreshThemeIcon() {
+    image->setPixmap(QIcon::fromTheme(QStringLiteral("plus_folder")).pixmap(200));
 }
 
 void GameListPlaceholder::changeEvent(QEvent* event) {

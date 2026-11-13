@@ -175,7 +175,6 @@ void ConfigureUi::ApplyConfiguration() {
     const u32 height = ScreenshotDimensionToInt(ui->screenshot_height->currentText());
     UISettings::values.screenshot_height.SetValue(height);
 
-    RequestGameListUpdate();
     system.ApplySettings();
 }
 

@@ -440,3 +440,31 @@ public:
         return false;
     }
 };
+
+/// Gives a folder, Add New Game Directory or Favorites row the icon of the current theme again,
+/// so a theme change doesn't need a new scan of the library.
+static void RefreshThemeIcon(QStandardItem* item) {
+    const char* icon_name = nullptr;
+    switch (static_cast<GameListItemType>(item->type())) {
+    case GameListItemType::SdmcDir:
+        icon_name = "sd_card";
+        break;
+    case GameListItemType::UserNandDir:
+    case GameListItemType::SysNandDir:
+        icon_name = "chip";
+        break;
+    case GameListItemType::CustomDir:
+        icon_name =
+            QFileInfo::exists(item->data(Qt::DisplayRole).toString()) ? "folder" : "bad_folder";
+        break;
+    case GameListItemType::AddDir:
+        icon_name = "list-add";
+        break;
+    case GameListItemType::Favorites:
+        icon_name = "star";
+        break;
+    default:
+        return;
+    }
+    item->setData(ThemeIcon(icon_name), Qt::DecorationRole);
+}

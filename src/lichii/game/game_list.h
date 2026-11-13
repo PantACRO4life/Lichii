@@ -95,6 +95,7 @@ public slots:
     void RefreshGameDirectory();
     void RefreshExternalContent();
     void UpdateIconSizes();
+    void RefreshThemeIcons();
     void OnPopulate();
 
 signals:
@@ -191,6 +192,8 @@ class GameListPlaceholder : public QWidget {
 public:
     explicit GameListPlaceholder(MainWindow* parent = nullptr);
     ~GameListPlaceholder();
+
+    void RefreshThemeIcon();
 
 signals:
     void AddDirectory();
