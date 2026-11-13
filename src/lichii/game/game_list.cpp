@@ -55,6 +55,11 @@
 #include "lichii/util/icon_search.h"
 #include "lichii/util/util.h"
 
+namespace {
+// A few at a time keeps SteamGridDB happy and the scan of a large library short.
+constexpr int MaxParallelLookups = 2;
+} // namespace
+
 GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvider* provider_,
                    PlayTime::PlayTimeManager& play_time_manager_, Core::System& system_,
                    MainWindow* parent)
@@ -62,6 +67,7 @@ GameList::GameList(FileSys::VirtualFilesystem vfs_, FileSys::ManualContentProvid
       play_time_manager{play_time_manager_}, system{system_} {
 
     this->main_window = parent;
+    artwork_pool.setMaxThreadCount(MaxParallelLookups);
     layout = new QVBoxLayout;
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
@@ -124,8 +130,10 @@ void GameList::SetNxToolRunning(bool running) {
 }
 
 GameList::~GameList() {
-    // Running lookups see the flag and stop; their results are dropped with this widget.
+    // Running lookups see the flag and stop; their results are dropped with this widget. Lookups
+    // that have not started are dropped; the pool then waits for the running ones.
     artwork_cancel->store(true);
+    artwork_pool.clear();
     UnloadController();
 }
 
@@ -452,8 +460,6 @@ void GameList::QueueArtworkLookup(u64 program_id, const QString& title, bool for
 }
 
 void GameList::StartArtworkLookups() {
-    // A few at a time keeps SteamGridDB happy and the scan of a large library short.
-    constexpr int MaxParallelLookups = 2;
     while (artwork_running < MaxParallelLookups && !artwork_queue.isEmpty()) {
         ArtworkLookup lookup = artwork_queue.takeFirst();
         lookup.key = UISettings::values.steamgriddb_api_key.GetValue();
@@ -516,8 +522,8 @@ void GameList::StartArtworkLookups() {
         // of an older game, so the newest release of that name is the right one.
         const bool prefer_newest = (lookup.program_id >> 56) == 0x04;
         watcher->setFuture(QtConcurrent::run(
-            [title = lookup.title.toStdString(), key = lookup.key, cancel = artwork_cancel,
-             prefer_newest] {
+            &artwork_pool, [title = lookup.title.toStdString(), key = lookup.key,
+                            cancel = artwork_cancel, prefer_newest] {
                 return LookUpSteamGridDbArtwork(title, key, *cancel, prefer_newest);
             }));
     }

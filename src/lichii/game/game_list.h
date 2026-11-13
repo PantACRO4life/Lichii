@@ -14,6 +14,7 @@
 #include <QPushButton>
 #include <QStandardItemModel>
 #include <QString>
+#include <QThreadPool>
 #include <QVBoxLayout>
 #include <QVector>
 #include <atomic>
@@ -226,6 +227,9 @@ private:
     /// their rows with the default picture after the save, so the artwork is shown again.
     QSet<u64> artwork_saved;
     std::shared_ptr<std::atomic_bool> artwork_cancel = std::make_shared<std::atomic_bool>(false);
+    /// Lookups wait on the network: their own threads keep them from holding up a library scan
+    /// on the global pool.
+    QThreadPool artwork_pool;
 };
 
 class GameListPlaceholder : public QWidget {
