@@ -158,6 +158,11 @@ std::string UrlEncode(std::string_view value) {
 constexpr std::chrono::seconds SearchDeadline{10};
 constexpr std::size_t MaxHttpBodySize = 4 * 1024 * 1024;
 constexpr std::chrono::seconds PrimarySourceDeadline{5};
+// cpp-httplib cannot be interrupted from another thread while it connects or waits for the first
+// bytes of a reply, so these waits are kept short: a cancelled lookup ends within them instead of
+// at the deadline of the whole search. A download in progress stops on cancel right away.
+constexpr std::chrono::milliseconds ConnectTimeout{5000};
+constexpr std::chrono::milliseconds ReadTimeout{8000};
 constexpr std::string_view IconSiteHost = "https://switchiconshowdown.com";
 constexpr std::string_view SgdbApiBase = "https://www.steamgriddb.com/api/v2";
 
@@ -204,9 +209,9 @@ HttpResult HttpGet(const std::string& full_url, std::chrono::steady_clock::time_
     }
     try {
         httplib::Client client(origin);
-        client.set_connection_timeout(remaining);
-        client.set_read_timeout(remaining);
-        client.set_write_timeout(remaining);
+        client.set_connection_timeout(std::min(remaining, ConnectTimeout));
+        client.set_read_timeout(std::min(remaining, ReadTimeout));
+        client.set_write_timeout(std::min(remaining, ConnectTimeout));
         client.set_max_timeout(remaining);
         client.set_follow_location(true);
 #ifdef LICHII_BUNDLED_OPENSSL
