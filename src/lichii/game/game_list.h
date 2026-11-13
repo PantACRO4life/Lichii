@@ -222,6 +222,9 @@ private:
     std::string artwork_key;
     int artwork_running = 0;
     bool artwork_failure_logged = false;
+    /// Programs whose looked up artwork was saved since the last scan finished. A scan can add
+    /// their rows with the default picture after the save, so the artwork is shown again.
+    QSet<u64> artwork_saved;
     std::shared_ptr<std::atomic_bool> artwork_cancel = std::make_shared<std::atomic_bool>(false);
 };
 

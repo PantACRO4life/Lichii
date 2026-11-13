@@ -372,6 +372,12 @@ void GameList::OnPopulatingCompleted(const QStringList& watch_list) {
         OnTextChanged(search_field->filterText());
     }
 
+    // Artwork a lookup saved while this scan ran can be missing from rows added after the save.
+    for (const u64 program_id : std::as_const(artwork_saved)) {
+        ShowCustomArtwork(program_id);
+    }
+    artwork_saved.clear();
+
     emit PopulatingCompleted();
     QueueArtworkLookups();
 }
@@ -479,6 +485,7 @@ void GameList::StartArtworkLookups() {
             if (result.status == ArtworkLookupStatus::Found && newest && !artwork_added) {
                 if (QtCommon::Game::SaveCustomArtwork(lookup.program_id, result.image)) {
                     LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
+                    artwork_saved.insert(lookup.program_id);
                     ShowCustomArtwork(lookup.program_id);
                 }
             } else if (newest && result.status != ArtworkLookupStatus::Found &&
