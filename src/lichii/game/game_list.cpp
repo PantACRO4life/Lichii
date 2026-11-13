@@ -481,10 +481,11 @@ void GameList::StartArtworkLookups() {
                     LOG_INFO(Frontend, "SteamGridDB artwork saved for {:016X}", lookup.program_id);
                     ShowCustomArtwork(lookup.program_id);
                 }
-            } else if (result.status != ArtworkLookupStatus::Found &&
+            } else if (newest && result.status != ArtworkLookupStatus::Found &&
                        result.status != ArtworkLookupStatus::Cancelled &&
                        !artwork_failure_logged) {
-                // A found picture that was dropped is no failure, so the one log stays free.
+                // A found picture that was dropped is no failure, and neither is the result of a
+                // lookup replaced by a newer one, so the one log stays free.
                 // Logged once per session. The key itself is never logged.
                 artwork_failure_logged = true;
                 const char* reason = "it could not be reached";
