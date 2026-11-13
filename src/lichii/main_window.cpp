@@ -5184,11 +5184,19 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
     std::string title_name;
     std::string title_version;
 
+    // The loader's name stays when the game has no control metadata (a NUP without an installed
+    // control record), as on boot.
+    if (QtCommon::system->GetGameName(title_name) != Loader::ResultStatus::Success) {
+        title_name.clear();
+    }
+
     const FileSys::PatchManager pm(program_id, QtCommon::system->GetFileSystemController(),
                                    QtCommon::system->GetContentProvider());
     if (const auto metadata = pm.GetControlMetadata(); metadata.first != nullptr) {
         title_version = metadata.first->GetVersionString();
-        title_name = metadata.first->GetApplicationName();
+        if (auto metadata_name = metadata.first->GetApplicationName(); !metadata_name.empty()) {
+            title_name = std::move(metadata_name);
+        }
     }
     if (auto custom_title = QtCommon::Game::ReadCustomTitle(program_id); !custom_title.empty()) {
         title_name = std::move(custom_title);
