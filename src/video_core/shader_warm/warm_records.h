@@ -45,6 +45,12 @@ constexpr size_t AttributeTypesOffset = 112;
 constexpr u64 DefaultAttributeTypes = 0x555555555555f555ULL;
 
 using GraphicsKey = std::array<u8, GraphicsKeySize>;
+
+/// What the builder finds in the game files, recorded in the precache's count file. A file built by
+/// an older builder is built again at launch (WarmFilesStale). 2: Mario Kart World's .esetb
+/// effects. 3: .ptcl particle effects (Fire Emblem).
+constexpr u32 WarmBuilderVersion = 3;
+
 using ComputeKey = std::array<u8, 24>;
 
 /// A program lowered and laid out as LowerNativeCode (video_core/shader_environment.cpp) does,
