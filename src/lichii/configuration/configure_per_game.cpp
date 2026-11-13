@@ -967,6 +967,7 @@ bool ConfigurePerGame::SaveCustomMetadata(bool show_error) {
         return false;
     }
     initial_title = new_title;
+    title_changed = true;
     const std::string shown = custom_title.empty() ? original_title : custom_title;
     if (shown.empty()) {
         // No name to show in place: let the library read it again.

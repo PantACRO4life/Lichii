@@ -74,6 +74,12 @@ public:
         return renamed_title;
     }
 
+    /// True when a new custom name was saved or the custom name was removed, even when there is no
+    /// name to show in place and the library reads it again.
+    bool TitleChanged() const {
+        return title_changed;
+    }
+
 private:
     void done(int result) override;
     void changeEvent(QEvent* event) override;
@@ -103,6 +109,7 @@ private:
     std::string original_title;
     std::string initial_title;
     std::optional<QString> renamed_title;
+    bool title_changed{false};
     std::vector<u8> pending_nup_icon;
     bool nup_icon_modified{false};
     /// The game's own icon, shown again when the custom artwork is removed.

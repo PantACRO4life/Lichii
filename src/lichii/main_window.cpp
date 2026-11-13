@@ -4235,11 +4235,12 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     // A rename only changes the shown name: no rescan of the library.
     if (const auto renamed = dialog.RenamedTitle()) {
         game_list->SetGameTitle(title_id, *renamed);
-        // The running game shows the new name in the window title too.
-        if (emulation_running && title_id != 0 &&
-            title_id == QtCommon::system->GetApplicationProcessProgramID()) {
-            OnApplicationChanged(title_id);
-        }
+    }
+    // The running game shows the new name in the window title too, also when the custom name was
+    // removed from a game that has no name of its own to show in the library.
+    if (dialog.TitleChanged() && emulation_running && title_id != 0 &&
+        title_id == QtCommon::system->GetApplicationProcessProgramID()) {
+        OnApplicationChanged(title_id);
     }
 
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied) {
@@ -5184,11 +5185,19 @@ void MainWindow::OnApplicationChanged(u64 program_id) {
     std::string title_name;
     std::string title_version;
 
+    // The loader's name stays when the game has no control metadata (a NUP without an installed
+    // control record), as on boot.
+    if (QtCommon::system->GetGameName(title_name) != Loader::ResultStatus::Success) {
+        title_name.clear();
+    }
+
     const FileSys::PatchManager pm(program_id, QtCommon::system->GetFileSystemController(),
                                    QtCommon::system->GetContentProvider());
     if (const auto metadata = pm.GetControlMetadata(); metadata.first != nullptr) {
         title_version = metadata.first->GetVersionString();
-        title_name = metadata.first->GetApplicationName();
+        if (auto metadata_name = metadata.first->GetApplicationName(); !metadata_name.empty()) {
+            title_name = std::move(metadata_name);
+        }
     }
     if (auto custom_title = QtCommon::Game::ReadCustomTitle(program_id); !custom_title.empty()) {
         title_name = std::move(custom_title);
