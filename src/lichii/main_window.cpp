@@ -4235,11 +4235,12 @@ void MainWindow::OpenPerGameConfiguration(u64 title_id, const std::string& file_
     // A rename only changes the shown name: no rescan of the library.
     if (const auto renamed = dialog.RenamedTitle()) {
         game_list->SetGameTitle(title_id, *renamed);
-        // The running game shows the new name in the window title too.
-        if (emulation_running && title_id != 0 &&
-            title_id == QtCommon::system->GetApplicationProcessProgramID()) {
-            OnApplicationChanged(title_id);
-        }
+    }
+    // The running game shows the new name in the window title too, also when the custom name was
+    // removed from a game that has no name of its own to show in the library.
+    if (dialog.TitleChanged() && emulation_running && title_id != 0 &&
+        title_id == QtCommon::system->GetApplicationProcessProgramID()) {
+        OnApplicationChanged(title_id);
     }
 
     if (result != QDialog::Accepted && !UISettings::values.configuration_applied) {
